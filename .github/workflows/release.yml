@@ -171,15 +171,15 @@ jobs:
         run: 7z a "bombicat-${VERSION}-win-portable.zip" target/release/bombicat.exe
 
       - name: Inno Setup installer
-        shell: bash
+        shell: pwsh
         env:
           VERSION: ${{ steps.ver.outputs.VERSION }}
         run: |
-          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
-            "/DMyAppVersion=${VERSION}" \
-            "/DMySourceDir=$(cygpath -w "$(pwd)/target/release")" \
-            "/DMyOutputDir=$(cygpath -w "$(pwd)")" \
-            packaging/bombicat.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DMyAppVersion=$env:VERSION" `
+            "/DMySourceDir=$(Resolve-Path 'target\release')" `
+            "/DMyOutputDir=$((Get-Location).Path)" `
+            "packaging\bombicat.iss"
 
       - uses: actions/upload-artifact@v4
         with:
