@@ -179,7 +179,7 @@ jobs:
             "/DMyAppVersion=$env:VERSION" `
             "/DMySourceDir=$(Resolve-Path 'target\release')" `
             "/DMyOutputDir=$((Get-Location).Path)" `
-            "packaging\bombicat.iss"
+            "packaging\windows\innosetup\bombicat.iss"
 
       - uses: actions/upload-artifact@v4
         with:

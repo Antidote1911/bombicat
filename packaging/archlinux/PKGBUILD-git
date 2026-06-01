@@ -1,0 +1,48 @@
+# Maintainer: Antidote1911
+pkgname=bombicat-git
+pkgver=r1.0000000
+pkgrel=1
+pkgdesc="A minesweeper with cats, written in Rust with egui (git)"
+arch=('x86_64')
+url="https://github.com/Antidote1911/bombicat"
+license=('GPL-3.0-only')
+depends=('libxcb' 'libxkbcommon' 'wayland' 'libgl')
+makedepends=('rust' 'git')
+provides=('bombicat')
+conflicts=('bombicat' 'bombicat-appimage')
+source=("${pkgname}::git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "${pkgname}"
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+    cd "${pkgname}"
+    cargo build --release
+}
+
+package() {
+    cd "${pkgname}"
+
+    install -Dm755 "target/release/bombicat" \
+        "${pkgdir}/usr/bin/bombicat"
+
+    install -Dm644 /dev/stdin \
+        "${pkgdir}/usr/share/applications/bombicat.desktop" << EOF
+[Desktop Entry]
+Name=Bombicat
+Comment=A minesweeper with cats
+Exec=bombicat
+Icon=bombicat
+Type=Application
+Categories=Game;LogicGame;BoardGame;
+EOF
+
+    install -Dm644 "assets/images/cat.svg" \
+        "${pkgdir}/usr/share/icons/hicolor/scalable/apps/bombicat.svg"
+
+    install -Dm644 "LICENSE" \
+        "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

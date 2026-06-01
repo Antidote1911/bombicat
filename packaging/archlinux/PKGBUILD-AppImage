@@ -1,0 +1,36 @@
+# Maintainer: Antidote1911
+pkgname=bombicat-appimage
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="A minesweeper with cats, written in Rust with egui (AppImage)"
+arch=('x86_64')
+url="https://github.com/Antidote1911/bombicat"
+license=('GPL-3.0-only')
+depends=()
+provides=('bombicat')
+conflicts=('bombicat' 'bombicat-git')
+source=("bombicat-${pkgver}-linux.AppImage::${url}/releases/download/v${pkgver}/bombicat-${pkgver}-linux.AppImage")
+sha256sums=('SKIP')
+
+package() {
+    cd "${srcdir}"
+
+    chmod +x "bombicat-${pkgver}-linux.AppImage"
+    APPIMAGE_EXTRACT_AND_RUN=1 "./bombicat-${pkgver}-linux.AppImage" --appimage-extract
+
+    install -Dm755 squashfs-root/usr/bin/bombicat \
+        "${pkgdir}/usr/bin/bombicat"
+
+    install -Dm644 squashfs-root/bombicat.desktop \
+        "${pkgdir}/usr/share/applications/bombicat.desktop"
+
+    find squashfs-root/usr/share/icons -name "bombicat.png" -print -quit \
+        | xargs -I{} install -Dm644 {} \
+            "${pkgdir}/usr/share/icons/hicolor/256x256/apps/bombicat.png"
+
+    install -Dm644 /dev/stdin \
+        "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE" << 'EOF'
+This package is licensed under the GNU General Public License v3.0.
+See https://www.gnu.org/licenses/gpl-3.0.html
+EOF
+}
