@@ -14,6 +14,7 @@ Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
+SetupIconFile={#MyRootDir}\assets\images\cat.ico
 UninstallDisplayIcon={app}\{#MyAppExe}
 
 [Files]

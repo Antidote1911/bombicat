@@ -1,35 +1,24 @@
 # Maintainer: Antidote1911
-pkgname=bombicat-git
-pkgver=r1.0000000
+pkgname=bombicat-bin
+pkgver=1.0.1
 pkgrel=1
-pkgdesc="A minesweeper with cats, written in Rust with egui (git)"
+pkgdesc="A minesweeper with cats, written in Rust with egui (pre-compiled binary)"
 arch=('x86_64')
 url="https://github.com/Antidote1911/bombicat"
 license=('GPL-3.0-only')
 depends=('libxcb' 'libxkbcommon' 'wayland' 'libgl')
-makedepends=('rust' 'git')
 provides=('bombicat')
-conflicts=('bombicat' 'bombicat-appimage' 'bombicat-bin')
-source=("${pkgname}::git+${url}.git")
+conflicts=('bombicat' 'bombicat-git' 'bombicat-appimage')
+source=("bombicat-${pkgver}-linux-x86_64.tar.gz::${url}/releases/download/v${pkgver}/bombicat-${pkgver}-linux-x86_64.tar.gz")
 sha256sums=('SKIP')
 
-pkgver() {
-    cd "${pkgname}"
-    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
-}
-
-build() {
-    cd "${pkgname}"
-    cargo build --release
-}
-
 package() {
-    cd "${pkgname}"
+    cd "bombicat-${pkgver}-linux-x86_64"
 
-    install -Dm755 "target/release/bombicat" \
+    install -Dm755 bombicat \
         "${pkgdir}/usr/bin/bombicat"
 
-    install -Dm644 "assets/images/cat.svg" \
+    install -Dm644 cat.svg \
         "${pkgdir}/usr/share/icons/hicolor/scalable/apps/bombicat.svg"
 
     cat > "${srcdir}/bombicat.desktop" << 'EOF'

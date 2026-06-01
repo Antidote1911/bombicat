@@ -57,10 +57,23 @@ jobs:
 
           mv Bombicat-*.AppImage "bombicat-${VERSION}-linux.AppImage"
 
+      - name: Package binary tarball
+        env:
+          VERSION: ${{ steps.ver.outputs.VERSION }}
+        run: |
+          mkdir "bombicat-${VERSION}-linux-x86_64"
+          cp target/release/bombicat "bombicat-${VERSION}-linux-x86_64/"
+          cp assets/images/cat.svg   "bombicat-${VERSION}-linux-x86_64/"
+          cp LICENSE                 "bombicat-${VERSION}-linux-x86_64/"
+          tar czf "bombicat-${VERSION}-linux-x86_64.tar.gz" \
+            "bombicat-${VERSION}-linux-x86_64/"
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: bombicat-*.AppImage
+          path: |
+            bombicat-*.AppImage
+            bombicat-*-linux-x86_64.tar.gz
 
   # ── macOS Universal DMG ─────────────────────────────────────────────────────
   macos:
@@ -179,6 +192,7 @@ jobs:
             "/DMyAppVersion=$env:VERSION" `
             "/DMySourceDir=$(Resolve-Path 'target\release')" `
             "/DMyOutputDir=$((Get-Location).Path)" `
+            "/DMyRootDir=$((Get-Location).Path)" `
             "packaging\windows\innosetup\bombicat.iss"
 
       - uses: actions/upload-artifact@v4
@@ -204,6 +218,7 @@ jobs:
           generate_release_notes: true
           files: |
             bombicat-*.AppImage
+            bombicat-*-linux-x86_64.tar.gz
             bombicat-*.dmg
             bombicat-*-win-portable.zip
             bombicat-*-win-setup.exe
