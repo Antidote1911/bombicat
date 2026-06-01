@@ -5,81 +5,87 @@
 [![Rust](https://img.shields.io/badge/Rust-2021-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL%20v3-blue?style=flat-square)](LICENSE)
 
-![Capture d'écran de Bombicat](bombicat.png)
+![Bombicat screenshot](bombicat.png)
 
-Un démineur avec des chats, écrit en Rust avec [egui](https://github.com/emilk/egui).
+A minesweeper with cats, written in Rust with [egui](https://github.com/emilk/egui).
 
-## Fonctionnalités
+[Lire en français](README_fr.md)
 
-- **6 niveaux de difficulté** — de Débutant à Chuck Norris
-- **Génération sans hasard (no-guess)** — chaque grille est garantie résolvable par déduction pure, sans jamais avoir à deviner
-- **Meilleurs scores** — classement des 10 meilleurs temps par niveau, stocké localement en SQLite
-- **Interface sombre** — rendu entièrement vectoriel via egui
+## Features
 
-## Contrôles
+- **6 difficulty levels** — from Beginner to Chuck Norris
+- **No-guess generation** — every grid is guaranteed solvable by pure logic, no guessing required
+- **High scores** — top 10 times per level, stored locally in SQLite
+- **Dark UI** — fully vector-rendered via egui
 
-| Action | Commande |
+## Controls
+
+| Action | Input |
 |---|---|
-| Découvrir une case | Clic gauche |
-| Poser / retirer un drapeau / `?` | Clic droit (cycle : aucun → drapeau → `?`) |
-| Nouvelle partie | Bouton smiley ou `Ctrl+N` |
+| Reveal a cell | Left click |
+| Place / remove a flag / `?` | Right click (cycles: none → flag → `?`) |
+| New game | Smiley button or `Ctrl+N` |
 
-## Niveaux
+## Levels
 
-| Niveau | Grille | Chats |
+| Level | Grid | Cats |
 |---|---|---|
-| Débutant | 15 × 10 | 15 |
+| Beginner | 15 × 10 | 15 |
 | Normal | 20 × 15 | 25 |
-| Difficile | 25 × 15 | 35 |
-| Ultra Difficile | 27 × 20 | 110 |
-| Géant | 35 × 22 | 160 |
+| Hard | 25 × 15 | 35 |
+| Very Hard | 27 × 20 | 110 |
+| Giant | 35 × 22 | 160 |
 | Chuck Norris | 40 × 25 | 215 |
 
-## Compilation et lancement
+## Building and running
 
-Prérequis : [Rust](https://rustup.rs/) (édition 2021 ou supérieure)
+Prerequisite: [Rust](https://rustup.rs/) (edition 2021 or later)
 
 ```bash
 cargo run --release
 ```
 
-### Mode triche
+### Cheat mode
 
-Le flag `--cheat` active le clic milieu qui révèle toute la grille d'un coup :
+The `--cheat` flag enables middle-click to reveal the entire grid at once:
 
 ```bash
 cargo run --release -- --cheat
 ```
 
-## Algorithme no-guess
+## No-guess algorithm
 
-À chaque nouvelle partie, le premier clic déclenche la génération en arrière-plan. Le générateur produit des placements aléatoires en parallèle (via Rayon) et les soumet à un solveur logique qui simule ce qu'un joueur peut déduire :
+On each new game, the first click triggers grid generation in a background thread. The generator produces random cat placements in parallel (via Rayon) and feeds them to a logic solver that simulates what a player can deduce:
 
-- **Contrainte locale** : si le nombre de cases cachées autour d'un chiffre est égal au nombre de chats restants à trouver → toutes sont des chats (flaggage automatique)
-- **Contrainte locale** : si tous les chats voisins sont déjà flaggés → les cases cachées restantes sont sûres (révélation automatique)
-- **Contrainte globale** : si le total de chats restants égale le total de cases cachées → toutes sont des chats ; si zéro chat restant → toutes sont sûres
+- **Local constraint**: if the number of hidden cells around a number equals its remaining cat count → all of them are cats (auto-flagged)
+- **Local constraint**: if all neighbouring cats are already flagged → remaining hidden neighbours are safe (auto-revealed)
+- **Global constraint**: if total remaining cats equals total hidden cells → all are cats; if zero cats remain → all are safe
 
-La case cliquée et ses 8 voisines sont toujours garanties sans chat. Si le solveur arrive à révéler toute la grille sans jamais devoir deviner, la disposition est acceptée. Sinon, un nouveau placement est généré et le processus recommence. En pratique, les niveaux courants convergent en moins de 10 essais.
+The clicked cell and its 8 neighbours are always guaranteed cat-free. If the solver can reveal the entire grid without ever guessing, the layout is accepted. Otherwise a new placement is generated and the process repeats. In practice, current levels converge in under 10 attempts.
 
-## Structure du projet
+## Project structure
 
 ```
 src/
-  main.rs      — point d'entrée, configuration de la fenêtre
-  app.rs       — logique d'interface (egui), gestion des clics et modales
-  model.rs     — modèle de jeu, placement des chats, solveur no-guess
-  scores.rs    — persistance des scores (SQLite via rusqlite)
-  settings.rs  — préférences utilisateur (niveau, chemin de config)
+  main.rs      — entry point, window setup
+  app.rs       — UI logic (egui), click handling and modals
+  model.rs     — game model, cat placement, no-guess solver
+  scores.rs    — score persistence (SQLite via rusqlite)
+  settings.rs  — user preferences (level, config path)
 assets/
   images/
-    cat.svg           — icône chat (mine)
-    disarmed_red.png  — drapeau mal placé (révélé en fin de partie)
-    question.png      — marqueur point d'interrogation
+    cat.svg           — cat icon (mine)
+    disarmed_red.png  — misplaced flag (revealed at game over)
+    question.png      — question mark marker
 ```
 
-## Données persistantes
+## Persistent data
 
-Les fichiers de données sont stockés dans les dossiers standard du système :
+Data files are stored in standard system directories:
 
-- **Config** : `$XDG_CONFIG_HOME/bombicat/config.json` (Linux) / `~/Library/Application Support/bombicat/config.json` (macOS)
-- **Scores** : `$XDG_DATA_HOME/bombicat/scores.sqlite`
+- **Config**: `$XDG_CONFIG_HOME/bombicat/config.json` (Linux) / `~/Library/Application Support/bombicat/config.json` (macOS) / `%APPDATA%\bombicat\config.json` (Windows)
+- **Scores**: `$XDG_DATA_HOME/bombicat/scores.sqlite`
+
+## License
+
+[GNU General Public License v3.0](LICENSE)
