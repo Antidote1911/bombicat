@@ -1,0 +1,209 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Linux AppImage ──────────────────────────────────────────────────────────
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libwayland-dev libxi-dev libxrandr-dev \
+            libxcursor-dev libxrender-dev librsvg2-bin
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Get version
+        id: ver
+        run: echo "VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Package AppImage
+        env:
+          VERSION: ${{ steps.ver.outputs.VERSION }}
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          wget -q \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
+            -O linuxdeploy && chmod +x linuxdeploy
+
+          rsvg-convert -w 256 -h 256 assets/images/cat.svg -o /tmp/bombicat.png
+
+          printf '[Desktop Entry]\nName=Bombicat\nExec=bombicat\nIcon=bombicat\nType=Application\nCategories=Game;\n' \
+            > /tmp/bombicat.desktop
+
+          ./linuxdeploy \
+            --appdir AppDir \
+            --executable target/release/bombicat \
+            --desktop-file /tmp/bombicat.desktop \
+            --icon-file /tmp/bombicat.png \
+            --output appimage
+
+          mv Bombicat-*.AppImage "bombicat-${VERSION}-linux.AppImage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: bombicat-*.AppImage
+
+  # ── macOS Universal DMG ─────────────────────────────────────────────────────
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Build aarch64
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Get version
+        id: ver
+        run: echo "VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Package DMG
+        env:
+          VERSION: ${{ steps.ver.outputs.VERSION }}
+        run: |
+          brew install librsvg create-dmg
+
+          # Universal binary
+          lipo -create \
+            target/x86_64-apple-darwin/release/bombicat \
+            target/aarch64-apple-darwin/release/bombicat \
+            -output bombicat-universal
+
+          # App bundle
+          mkdir -p Bombicat.app/Contents/MacOS Bombicat.app/Contents/Resources
+          cp bombicat-universal Bombicat.app/Contents/MacOS/bombicat
+          chmod +x Bombicat.app/Contents/MacOS/bombicat
+
+          # Icon (.icns)
+          mkdir -p icon.iconset
+          for size in 16 32 128 256 512; do
+            rsvg-convert -w $size -h $size assets/images/cat.svg \
+              -o "icon.iconset/icon_${size}x${size}.png"
+            rsvg-convert -w $((size * 2)) -h $((size * 2)) assets/images/cat.svg \
+              -o "icon.iconset/icon_${size}x${size}@2x.png"
+          done
+          iconutil -c icns icon.iconset -o Bombicat.app/Contents/Resources/bombicat.icns
+
+          # Info.plist
+          cat > Bombicat.app/Contents/Info.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleExecutable</key>      <string>bombicat</string>
+            <key>CFBundleIconFile</key>        <string>bombicat</string>
+            <key>CFBundleIdentifier</key>      <string>com.bombicat.app</string>
+            <key>CFBundleName</key>            <string>Bombicat</string>
+            <key>CFBundleVersion</key>         <string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundlePackageType</key>     <string>APPL</string>
+            <key>NSHighResolutionCapable</key> <true/>
+          </dict></plist>
+          EOF
+
+          # Ad-hoc signature (évite le refus immédiat de Gatekeeper)
+          codesign --force --deep --sign - Bombicat.app
+
+          # DMG avec lien drag-to-Applications
+          create-dmg \
+            --volname "Bombicat ${VERSION}" \
+            --window-size 500 300 \
+            --icon-size 128 \
+            --icon "Bombicat.app" 130 140 \
+            --app-drop-link 370 140 \
+            "bombicat-${VERSION}-macos-universal.dmg" \
+            Bombicat.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: bombicat-*.dmg
+
+  # ── Windows (portable + installeur) ────────────────────────────────────────
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Get version
+        id: ver
+        shell: bash
+        run: echo "VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Portable ZIP
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.VERSION }}
+        run: 7z a "bombicat-${VERSION}-win-portable.zip" target/release/bombicat.exe
+
+      - name: Inno Setup installer
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.VERSION }}
+        run: |
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" \
+            "/DMyAppVersion=${VERSION}" \
+            "/DMySourceDir=$(cygpath -w "$(pwd)/target/release")" \
+            "/DMyOutputDir=$(cygpath -w "$(pwd)")" \
+            packaging/bombicat.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            bombicat-*-win-portable.zip
+            bombicat-*-win-setup.exe
+
+  # ── GitHub Release ──────────────────────────────────────────────────────────
+  release:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            bombicat-*.AppImage
+            bombicat-*.dmg
+            bombicat-*-win-portable.zip
+            bombicat-*-win-setup.exe
