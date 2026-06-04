@@ -118,6 +118,130 @@ impl Model {
         })
     }
 
+    pub fn load_custom(&mut self, width: usize, height: usize, bombs: &[bool]) {
+        self.width = width;
+        self.height = height;
+        self.total_cats = bombs.iter().filter(|&&b| b).count();
+        self.discovered_count = 0;
+        self.data = bombs.iter().map(|&cat| Field { cat, ..Default::default() }).collect();
+        for y in 0..height {
+            for x in 0..width {
+                let mut count = 0u8;
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        if dx == 0 && dy == 0 { continue; }
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32
+                            && self.data[ny as usize * width + nx as usize].cat
+                        {
+                            count += 1;
+                        }
+                    }
+                }
+                self.data[y * width + x].neighbours = count;
+            }
+        }
+    }
+
+}
+
+// ── solvability helpers (public, for editor) ─────────────────────────────
+
+fn build_fields(width: usize, height: usize, bombs: &[bool]) -> Vec<Field> {
+    let mut data: Vec<Field> = bombs.iter().map(|&cat| Field { cat, ..Default::default() }).collect();
+    for y in 0..height {
+        for x in 0..width {
+            let mut count = 0u8;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 { continue; }
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32
+                        && data[ny as usize * width + nx as usize].cat
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            data[y * width + x].neighbours = count;
+        }
+    }
+    data
+}
+
+fn flood_fill_count(data: &[Field], width: usize, height: usize, sx: usize, sy: usize) -> usize {
+    let mut visited = vec![false; width * height];
+    let mut stack = vec![(sx, sy)];
+    let mut count = 0usize;
+    while let Some((x, y)) = stack.pop() {
+        let idx = y * width + x;
+        if visited[idx] || data[idx].cat { continue; }
+        visited[idx] = true;
+        count += 1;
+        if data[idx].neighbours == 0 {
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 { continue; }
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                        stack.push((nx as usize, ny as usize));
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Tests how many non-bomb starting positions allow the grid to be solved
+/// by pure logic (no guessing). Returns (solvable_count, total_starts).
+pub fn count_solvable_starts(width: usize, height: usize, bombs: &[bool]) -> (usize, usize) {
+    let data = build_fields(width, height, bombs);
+    let total_cats = bombs.iter().filter(|&&b| b).count();
+    let starts: Vec<(usize, usize)> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .filter(|&(x, y)| !data[y * width + x].cat)
+        .collect();
+    let total = starts.len();
+    let solvable = starts.into_par_iter()
+        .filter(|&(sx, sy)| grid_is_solvable(&data, width, height, total_cats, sx, sy))
+        .count();
+    (solvable, total)
+}
+
+/// Finds the best automatic starting position for a custom grid:
+/// among solvable positions, picks the one that reveals the largest area.
+/// Falls back to the largest flood-fill area if no solvable start exists.
+/// Returns `None` only if the grid has no non-bomb cells at all.
+pub fn find_best_start(width: usize, height: usize, bombs: &[bool]) -> Option<(usize, usize)> {
+    let data = build_fields(width, height, bombs);
+    let total_cats = bombs.iter().filter(|&&b| b).count();
+
+    let starts: Vec<(usize, usize)> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .filter(|&(x, y)| !data[y * width + x].cat)
+        .collect();
+
+    if starts.is_empty() { return None; }
+
+    // Best solvable start (largest flood-fill area among solvable positions)
+    let best_solvable = starts.par_iter().filter_map(|&(sx, sy)| {
+        if !grid_is_solvable(&data, width, height, total_cats, sx, sy) { return None; }
+        Some((flood_fill_count(&data, width, height, sx, sy), sx, sy))
+    }).max_by_key(|&(area, _, _)| area);
+
+    if let Some((_, x, y)) = best_solvable {
+        return Some((x, y));
+    }
+
+    // Fallback: no solvable start — pick the largest flood-fill area
+    starts.par_iter()
+        .map(|&(sx, sy)| (flood_fill_count(&data, width, height, sx, sy), sx, sy))
+        .max_by_key(|&(area, _, _)| area)
+        .map(|(_, x, y)| (x, y))
 }
 
 // ── public generation entry point ────────────────────────────────────────
@@ -219,6 +343,26 @@ fn grid_simulate_reveal(
     }
 }
 
+fn neighbors_hidden(
+    x: usize, y: usize, width: usize, height: usize,
+    discovered: &[bool], flagged: &[bool],
+) -> (Vec<usize>, usize) {
+    let mut hidden = Vec::with_capacity(8);
+    let mut flag_count = 0usize;
+    for dy in -1i32..=1 {
+        for dx in -1i32..=1 {
+            if dx == 0 && dy == 0 { continue; }
+            let nx = x as i32 + dx; let ny = y as i32 + dy;
+            if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 { continue; }
+            let nidx = ny as usize * width + nx as usize;
+            if !discovered[nidx] {
+                if flagged[nidx] { flag_count += 1; } else { hidden.push(nidx); }
+            }
+        }
+    }
+    (hidden, flag_count)
+}
+
 fn grid_is_solvable(
     data: &[Field], width: usize, height: usize,
     total_cats: usize, start_x: usize, start_y: usize,
@@ -232,42 +376,24 @@ fn grid_is_solvable(
     loop {
         let mut progress = false;
 
+        // ── Phase 1 : contraintes locales (règles de base) ────────────────
         for y in 0..height {
             for x in 0..width {
                 let idx = y * width + x;
                 if !discovered[idx] || data[idx].cat { continue; }
                 let nb = data[idx].neighbours as usize;
                 if nb == 0 { continue; }
+                let (hidden, flag_count) =
+                    neighbors_hidden(x, y, width, height, &discovered, &flagged);
 
-                let mut hidden: Vec<usize> = Vec::new();
-                let mut flag_count = 0usize;
-
-                for dy in -1i32..=1 {
-                    for dx in -1i32..=1 {
-                        if dx == 0 && dy == 0 { continue; }
-                        let nx = x as i32 + dx;
-                        let ny = y as i32 + dy;
-                        if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 { continue; }
-                        let nidx = ny as usize * width + nx as usize;
-                        if !discovered[nidx] {
-                            if flagged[nidx] { flag_count += 1; }
-                            else { hidden.push(nidx); }
-                        }
-                    }
-                }
-
-                // All remaining hidden neighbours are cats → flag them.
                 if flag_count + hidden.len() == nb && !hidden.is_empty() {
                     for &nidx in &hidden { flagged[nidx] = true; progress = true; }
                 }
-                // All cats accounted for → reveal remaining hidden neighbours.
                 if flag_count == nb && !hidden.is_empty() {
                     for &nidx in &hidden {
                         if !discovered[nidx] {
-                            grid_simulate_reveal(
-                                data, &mut discovered, width, height,
-                                nidx % width, nidx / width,
-                            );
+                            grid_simulate_reveal(data, &mut discovered, width, height,
+                                                 nidx % width, nidx / width);
                             progress = true;
                         }
                     }
@@ -275,16 +401,80 @@ fn grid_is_solvable(
             }
         }
 
-        // Global constraint: compare remaining cats vs remaining hidden cells.
+        // ── Phase 2 : combinaison généralisée de paires de contraintes ───────
+        // Pour toute paire ordonnée (A, B) avec ra ≥ rb :
+        //   mines(A−B) − mines(B−A) = ra − rb
+        // Si ra − rb == |A−B|  →  toutes les cases de A−B sont des bombes
+        //                         toutes les cases de B−A sont sûres.
+        // Cas particulier ra−rb=0, |A−B|=0 : A ⊆ B, révéler B−A.
+        // La direction symétrique (rb ≥ ra) est couverte quand i et j sont échangés.
+        {
+            let mut constraints: Vec<(Vec<usize>, usize)> = Vec::new();
+            for y in 0..height {
+                for x in 0..width {
+                    let idx = y * width + x;
+                    if !discovered[idx] || data[idx].cat { continue; }
+                    let nb = data[idx].neighbours as usize;
+                    if nb == 0 { continue; }
+                    let (hidden, flag_count) =
+                        neighbors_hidden(x, y, width, height, &discovered, &flagged);
+                    if hidden.is_empty() { continue; }
+                    if nb < flag_count { continue; }
+                    let remaining = nb - flag_count;
+                    constraints.push((hidden, remaining));
+                }
+            }
+
+            let nc = constraints.len();
+            for i in 0..nc {
+                let (ref ha, ra) = constraints[i];
+                for j in 0..nc {
+                    if i == j { continue; }
+                    let (ref hb, rb) = constraints[j];
+                    // On ne traite que ra ≥ rb ; le cas symétrique (rb > ra)
+                    // est traité quand i et j sont échangés dans la double boucle.
+                    if ra < rb { continue; }
+
+                    // diff_a = A − B,  diff_b = B − A
+                    let diff_a: Vec<usize> = ha.iter()
+                        .filter(|&&c| !hb.contains(&c)).copied().collect();
+                    let diff_b: Vec<usize> = hb.iter()
+                        .filter(|&&c| !ha.contains(&c)).copied().collect();
+                    if diff_a.is_empty() && diff_b.is_empty() { continue; }
+
+                    // Condition : ra − rb = |diff_a|  →  toutes diff_a sont bombes,
+                    //                                     toutes diff_b sont sûres.
+                    if ra - rb == diff_a.len() {
+                        for &nidx in &diff_a {
+                            if !flagged[nidx] && !discovered[nidx] {
+                                flagged[nidx] = true;
+                                progress = true;
+                            }
+                        }
+                        for &nidx in &diff_b {
+                            if !discovered[nidx] {
+                                grid_simulate_reveal(data, &mut discovered, width, height,
+                                                     nidx % width, nidx / width);
+                                progress = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Phase 3 : contrainte globale ──────────────────────────────────
         let flags_placed   = flagged.iter().filter(|&&f| f).count();
         let remaining_cats = total_cats.saturating_sub(flags_placed);
-        let hidden_total: Vec<usize> = (0..n).filter(|&i| !discovered[i] && !flagged[i]).collect();
+        let hidden_total: Vec<usize> =
+            (0..n).filter(|&i| !discovered[i] && !flagged[i]).collect();
 
         if remaining_cats == hidden_total.len() && !hidden_total.is_empty() {
             for i in hidden_total { flagged[i] = true; progress = true; }
         } else if remaining_cats == 0 && !hidden_total.is_empty() {
             for i in hidden_total {
-                grid_simulate_reveal(data, &mut discovered, width, height, i % width, i / width);
+                grid_simulate_reveal(data, &mut discovered, width, height,
+                                     i % width, i / width);
                 progress = true;
             }
         }

@@ -1,4 +1,5 @@
 mod app;
+mod editor;
 mod model;
 mod scores;
 mod settings;

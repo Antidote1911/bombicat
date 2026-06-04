@@ -2,7 +2,19 @@ use egui::*;
 use std::sync::{Arc, mpsc::Receiver};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::{model::{Model, Field, generate_grid_no_guess}, scores, settings::Preferences};
+use crate::{
+    editor::{EditorState, SolvabilityStatus},
+    model::{Model, Field, generate_grid_no_guess, count_solvable_starts, find_best_start},
+    scores,
+    settings::Preferences,
+};
+
+#[derive(Clone, Copy)]
+struct HintState {
+    x: usize,
+    y: usize,
+    start_time: f64,
+}
 
 struct PendingGeneration {
     attempts: Arc<AtomicU32>,
@@ -11,7 +23,7 @@ struct PendingGeneration {
     click_y:  usize,
 }
 
-const CELL: f32 = 34.0;
+const CELL: f32 = 30.0;
 const FACE: f32 = 32.0;
 
 const NUM_COLORS: [Color32; 9] = [
@@ -90,6 +102,7 @@ enum Modal {
     Scores,
     SaveScore { time: i32 },
     About,
+    Error(String),
 }
 
 #[derive(Clone)]
@@ -117,6 +130,12 @@ pub struct BombicatApp {
     exploded: Option<(usize, usize)>,
     resize_pending: bool,
     pending_gen: Option<PendingGeneration>,
+    editor: Option<EditorState>,
+    is_custom: bool,
+    custom_bombs: Option<(usize, usize, Vec<bool>)>,
+    editor_solve_rx: Option<std::sync::mpsc::Receiver<(usize, usize)>>,
+    popup_was_open: bool,
+    hint: Option<HintState>,
 }
 
 impl BombicatApp {
@@ -139,6 +158,12 @@ impl BombicatApp {
             exploded: None,
             resize_pending: true,
             pending_gen: None,
+            editor: None,
+            is_custom: false,
+            custom_bombs: None,
+            editor_solve_rx: None,
+            popup_was_open: false,
+            hint: None,
         };
         app.new_game();
         app
@@ -154,14 +179,94 @@ impl BombicatApp {
         self.gen_attempts = 0;
         self.pending_gen = None;
         self.exploded = None;
+        self.is_custom = false;
+        self.custom_bombs = None;
+        self.editor = None;
+        self.hint = None;
         self.resize_pending = true;
     }
 
+    fn restart_custom_game(&mut self) {
+        if let Some((w, h, bombs)) = self.custom_bombs.clone() {
+            self.start_custom_game(w, h, bombs);
+        }
+    }
+
+    fn start_custom_game(&mut self, width: usize, height: usize, bombs: Vec<bool>) {
+        // Find best starting position before loading into model (uses Rayon internally)
+        let start = find_best_start(width, height, &bombs);
+
+        self.custom_bombs = Some((width, height, bombs.clone()));
+        self.model.load_custom(width, height, &bombs);
+        self.state = GameState::Running;
+        self.timer = 0.0;
+        self.last_time = None;
+        self.cat_display = self.model.total_cats() as i32;
+        self.gen_attempts = 0;
+        self.pending_gen = None;
+        self.exploded = None;
+        self.is_custom = true;
+        self.editor = None;
+        self.modal = Modal::None;
+        self.hint = None;
+        self.resize_pending = true;
+
+        // Auto-reveal the best starting area
+        if let Some((sx, sy)) = start {
+            self.discover_flood(sx, sy);
+            self.check_outcome();
+        }
+    }
+
+    fn trigger_hint(&mut self, ctx: &Context) {
+        if self.state != GameState::Running { return; }
+        let w = self.model.width;
+        let h = self.model.height;
+
+        // Prefer cells on the frontier (adjacent to already-discovered cells).
+        let is_safe_hidden = |x: usize, y: usize| {
+            let f = self.model.field(x, y);
+            !f.discovered && !f.cat
+        };
+        let on_frontier = |x: usize, y: usize| {
+            for dy in -1i32..=1 { for dx in -1i32..=1 {
+                if dx == 0 && dy == 0 { continue; }
+                let nx = x as i32 + dx; let ny = y as i32 + dy;
+                if self.model.is_valid(nx, ny)
+                    && self.model.field(nx as usize, ny as usize).discovered
+                { return true; }
+            }}
+            false
+        };
+
+        let frontier: Vec<(usize, usize)> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| is_safe_hidden(x, y) && on_frontier(x, y))
+            .collect();
+
+        let candidates = if !frontier.is_empty() { frontier } else {
+            (0..h).flat_map(|y| (0..w).map(move |x| (x, y)))
+                  .filter(|&(x, y)| is_safe_hidden(x, y))
+                  .collect::<Vec<_>>()
+        };
+
+        if candidates.is_empty() { return; }
+
+        let now = ctx.input(|i| i.time);
+        let idx = (now * 100.0) as usize % candidates.len();
+        let (x, y) = candidates[idx];
+        self.hint = Some(HintState { x, y, start_time: now });
+    }
+
     fn window_size_for_grid(&self) -> Vec2 {
-        vec2(
-            self.model.width  as f32 * CELL + 16.0,
-            self.model.height as f32 * CELL + 100.0,
-        )
+        if let Some(ref ed) = self.editor {
+            vec2(ed.width as f32 * CELL + 16.0, ed.height as f32 * CELL + 140.0)
+        } else {
+            vec2(
+                self.model.width  as f32 * CELL + 16.0,
+                self.model.height as f32 * CELL + 100.0,
+            )
+        }
     }
 
     // ── game actions ──────────────────────────
@@ -286,8 +391,10 @@ impl BombicatApp {
             self.exploded = self.model.find_exploded();
         } else if self.model.check_win() {
             self.state = GameState::Won;
-            let time = self.timer as i32;
-            self.modal = Modal::SaveScore { time };
+            if !self.is_custom {
+                let time = self.timer as i32;
+                self.modal = Modal::SaveScore { time };
+            }
         }
     }
 
@@ -472,6 +579,22 @@ fn lcd_label(ui: &mut Ui, value: i32) {
 
 impl eframe::App for BombicatApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Capture BEFORE any drawing — close_menu() clears this flag mid-frame.
+        // If a popup was open at the start of the frame, the user is likely
+        // clicking inside a menu; block grid input for this frame.
+        self.popup_was_open = ctx.memory(|m| m.any_popup_open());
+
+        if self.editor.is_some() {
+            self.draw_menubar(ctx);
+            self.draw_editor_statusbar(ctx);
+            self.draw_editor_panel(ctx);
+            if self.resize_pending {
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.window_size_for_grid()));
+                self.resize_pending = false;
+            }
+            return;
+        }
+
         // advance timer
         if self.state == GameState::Running {
             let now = ctx.input(|i| i.time);
@@ -515,6 +638,8 @@ impl eframe::App for BombicatApp {
 
 impl BombicatApp {
     fn draw_menubar(&mut self, ctx: &Context) {
+        let in_editor = self.editor.is_some();
+
         TopBottomPanel::top("menu").show(ctx, |ui| {
             menu::bar(ui, |ui| {
                 ui.menu_button("Fichier", |ui| {
@@ -522,12 +647,44 @@ impl BombicatApp {
                         self.new_game();
                         ui.close_menu();
                     }
-                    if ui.button("Meilleurs Scores").clicked() {
-                        self.modal = Modal::Scores;
+                    ui.add_enabled_ui(self.state == GameState::Running && !in_editor, |ui| {
+                        if ui.button("Aide             Ctrl+H").clicked() {
+                            self.trigger_hint(ctx);
+                            ui.close_menu();
+                        }
+                    });
+                    ui.add_enabled_ui(!in_editor, |ui| {
+                        if ui.button("Meilleurs Scores").clicked() {
+                            self.modal = Modal::Scores;
+                            ui.close_menu();
+                        }
+                        if ui.button("Préférences").clicked() {
+                            self.modal = Modal::Settings(SettingsState { level: self.prefs.level });
+                            ui.close_menu();
+                        }
+                    });
+                    ui.separator();
+                    if ui.button("Ouvrir une Grille…").clicked() {
                         ui.close_menu();
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Grilles Bombicat", &["bombicat"])
+                            .pick_file()
+                        {
+                            match EditorState::load(path) {
+                                Ok(ed) => self.start_custom_game(ed.width, ed.height, ed.bombs),
+                                Err(e) => self.modal = Modal::Error(e),
+                            }
+                        }
                     }
-                    if ui.button("Préférences").clicked() {
-                        self.modal = Modal::Settings(SettingsState { level: self.prefs.level });
+                    let editor_label = if in_editor { "Fermer l'Éditeur" } else { "Éditeur de Grille" };
+                    if ui.button(editor_label).clicked() {
+                        if in_editor {
+                            self.editor = None;
+                            self.resize_pending = true;
+                        } else {
+                            self.editor = Some(EditorState::new());
+                            self.resize_pending = true;
+                        }
                         ui.close_menu();
                     }
                     ui.separator();
@@ -548,28 +705,61 @@ impl BombicatApp {
         if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::N))) {
             self.new_game();
         }
+        // Ctrl+H hint shortcut
+        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::H))) {
+            self.trigger_hint(ctx);
+        }
     }
 
     fn draw_statusbar(&mut self, ctx: &Context) {
         TopBottomPanel::bottom("status").show(ctx, |ui| {
-            let (_, _, cats) = Preferences::level_params(self.prefs.level);
-            let level_name = Preferences::level_name(self.prefs.level);
-            let text = match self.state {
-                GameState::Lost => "Malheureusement, tu as perdu.".into(),
-                GameState::Won  => "Tu as gagné !".into(),
-                _ if self.gen_attempts == 0 => format!("{} — {} BombaCat", level_name, cats),
-                _ => format!("{} — {} BombaCat  (grille résoluble générée en {} essai{}.)",
-                    level_name, cats,
-                    self.gen_attempts,
-                    if self.gen_attempts > 1 { "s" } else { "" }),
+            let text = if self.is_custom {
+                let n = self.model.total_cats();
+                match self.state {
+                    GameState::Lost => "Grille personnalisée — Perdu !".into(),
+                    GameState::Won  => "Grille personnalisée — Gagné !".into(),
+                    _ => format!("Grille personnalisée — {} BombaCat", n),
+                }
+            } else {
+                let (_, _, cats) = Preferences::level_params(self.prefs.level);
+                let level_name = Preferences::level_name(self.prefs.level);
+                match self.state {
+                    GameState::Lost => "Malheureusement, tu as perdu.".into(),
+                    GameState::Won  => "Tu as gagné !".into(),
+                    _ if self.gen_attempts == 0 => format!("{} — {} BombaCat", level_name, cats),
+                    _ => format!("{} — {} BombaCat  (grille résoluble générée en {} essai{}.)",
+                        level_name, cats,
+                        self.gen_attempts,
+                        if self.gen_attempts > 1 { "s" } else { "" }),
+                }
             };
             ui.label(text);
         });
     }
 
+    fn draw_editor_statusbar(&self, ctx: &Context) {
+        TopBottomPanel::bottom("status").show(ctx, |ui| {
+            if let Some(ref ed) = self.editor {
+                let name = ed.path.as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Nouveau fichier");
+                let dirty = if ed.dirty { " *" } else { "" };
+                let nb = ed.bomb_count();
+                ui.label(format!(
+                    "Éditeur — {}{dirty}  •  {}×{}  •  {} bombe{}",
+                    name, ed.width, ed.height, nb,
+                    if nb != 1 { "s" } else { "" },
+                ));
+            }
+        });
+    }
+
     fn draw_game_panel(&mut self, ctx: &Context) {
         CentralPanel::default().show(ctx, |ui| {
-            let modal_open = !matches!(self.modal, Modal::None);
+            // Block grid input if a modal OR an egui popup (menu) is/was open,
+            // or if the editor was just opened in the same frame.
+            let modal_open = !matches!(self.modal, Modal::None) || self.editor.is_some();
 
             // ── top bar ──────────────────────
             let bar_height = FACE + 8.0;
@@ -617,7 +807,11 @@ impl BombicatApp {
                 }
             }
             if face_response.clicked() {
-                self.new_game();
+                if self.is_custom {
+                    self.restart_custom_game();
+                } else {
+                    self.new_game();
+                }
             }
 
             ui.separator();
@@ -630,18 +824,21 @@ impl BombicatApp {
             let cell = CELL;
 
             let grid_size = vec2(cols as f32 * cell, rows as f32 * cell);
-            let (grid_rect, _) =
-                ui.allocate_exact_size(grid_size, Sense::hover());
+            // Sense::click_and_drag makes egui track which widget owns the press,
+            // so clicked()/secondary_clicked() only fire when the mouse was pressed
+            // *on this widget* — clicks from menus or OS dialogs are excluded.
+            let (grid_rect, grid_resp) =
+                ui.allocate_exact_size(grid_size, Sense::click_and_drag());
 
-            // detect pressing for face expression
-            let pointer_down = ctx.input(|i| i.pointer.primary_down());
-            self.pressing = pointer_down && active;
+            // pressing for face expression (button held over the grid)
+            self.pressing = grid_resp.is_pointer_button_down_on() && active;
 
             // collect input
             let mut left_click: Option<(usize, usize)> = None;
             let mut right_click: Option<(usize, usize)> = None;
             let mut chord_click: Option<(usize, usize)> = None;
             let middle_released = self.cheat
+                && grid_resp.is_pointer_button_down_on()
                 && ctx.input(|i| i.pointer.button_released(PointerButton::Middle));
 
             if !modal_open && self.pending_gen.is_none() {
@@ -650,17 +847,20 @@ impl BombicatApp {
                     let col = ((pointer_pos.x - grid_rect.left()) / cell) as usize;
                     let row = ((pointer_pos.y - grid_rect.top()) / cell) as usize;
                     if col < cols && row < rows {
-                        let primary_released = ctx.input(|i| i.pointer.primary_released());
-                        let secondary_released = ctx.input(|i| i.pointer.secondary_released());
-                        let primary_down = ctx.input(|i| i.pointer.primary_down());
-                        let secondary_down = ctx.input(|i| i.pointer.secondary_down());
-
-                        if secondary_released && !primary_down {
+                        // clicked()/secondary_clicked() are layer-aware:
+                        // they require the press to have happened on this widget,
+                        // not on a menu popup or OS window above it.
+                        if grid_resp.secondary_clicked() {
                             right_click = Some((col, row));
-                        } else if primary_released && secondary_down {
-                            chord_click = Some((col, row));
-                        } else if primary_released && !secondary_down {
+                        } else if grid_resp.clicked() {
                             left_click = Some((col, row));
+                        } else if grid_resp.is_pointer_button_down_on() {
+                            // Chord: primary released while secondary still held
+                            let primary_released = ctx.input(|i| i.pointer.primary_released());
+                            let secondary_down   = ctx.input(|i| i.pointer.secondary_down());
+                            if primary_released && secondary_down {
+                                chord_click = Some((col, row));
+                            }
                         }
                     }
                 }
@@ -680,6 +880,28 @@ impl BombicatApp {
                 }
             }
 
+            // hint blink overlay
+            if let Some(hint) = self.hint {
+                let now = ctx.input(|i| i.time);
+                let elapsed = now - hint.start_time;
+                if elapsed < 5.0 && hint.x < cols && hint.y < rows {
+                    let blink_on = (elapsed * 2.5) as i32 % 2 == 0;
+                    if blink_on {
+                        let cr = Rect::from_min_size(
+                            grid_rect.min + vec2(hint.x as f32 * cell, hint.y as f32 * cell),
+                            Vec2::splat(cell),
+                        );
+                        painter.rect_filled(cr, 0.0, Color32::from_rgba_unmultiplied(0, 180, 255, 100));
+                        painter.rect_stroke(cr, 0.0,
+                            Stroke::new(2.5, Color32::from_rgb(0, 220, 255)),
+                            StrokeKind::Outside);
+                    }
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                } else {
+                    self.hint = None;
+                }
+            }
+
             // process input
             if middle_released {
                 self.reveal_all();
@@ -693,6 +915,12 @@ impl BombicatApp {
                 }
                 if let Some((x, y)) = chord_click {
                     self.chord_click(x, y);
+                }
+                // Stop hint blink on any click
+                if self.hint.is_some()
+                    && (left_click.is_some() || right_click.is_some() || chord_click.is_some())
+                {
+                    self.hint = None;
                 }
             }
         });
@@ -717,6 +945,7 @@ impl BombicatApp {
             Modal::Scores => self.draw_scores_modal(ctx),
             Modal::SaveScore { .. } => self.draw_savescore_modal(ctx),
             Modal::About => self.draw_about_modal(ctx),
+            Modal::Error(_) => self.draw_error_modal(ctx),
         }
     }
 
@@ -849,5 +1078,237 @@ impl BombicatApp {
             });
         });
         if close || resp.should_close() { self.modal = Modal::None; }
+    }
+
+    fn draw_error_modal(&mut self, ctx: &Context) {
+        let Modal::Error(ref msg) = self.modal else { return };
+        let msg = msg.clone();
+        let mut close = false;
+        let resp = egui::Modal::new(Id::new("error_modal"))
+            .backdrop_color(Color32::TRANSPARENT)
+            .show(ctx, |ui| {
+                ui.heading("Erreur");
+                ui.add_space(4.0);
+                ui.label(&msg);
+                ui.add_space(8.0);
+                if ui.button("  Fermer  ").clicked() { close = true; }
+            });
+        if close || resp.should_close() { self.modal = Modal::None; }
+    }
+
+    // ── editor ────────────────────────────────
+
+    fn draw_editor_panel(&mut self, ctx: &Context) {
+        let mut ed = match self.editor.take() {
+            Some(e) => e,
+            None => return,
+        };
+
+        // Poll solvability result from background thread
+        if let Some(ref rx) = self.editor_solve_rx {
+            match rx.try_recv() {
+                Ok((solvable, total)) => {
+                    ed.solvability = Some(if solvable > 0 {
+                        SolvabilityStatus::Solvable { count: solvable, total }
+                    } else {
+                        SolvabilityStatus::Unsolvable { total }
+                    });
+                    self.editor_solve_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.editor_solve_rx = None;
+                }
+                Err(_) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(80));
+                }
+            }
+        }
+
+        #[derive(PartialEq)]
+        enum Action { None, ApplySize, Clear, OpenFile, SaveFile, Play, Close }
+        let mut action = Action::None;
+
+        CentralPanel::default().show(ctx, |ui| {
+            // ── row 1: size + file ops ──────────
+            ui.horizontal(|ui| {
+                ui.label("Largeur :");
+                ui.add(TextEdit::singleline(&mut ed.width_buf).desired_width(38.0));
+                ui.label("Hauteur :");
+                ui.add(TextEdit::singleline(&mut ed.height_buf).desired_width(38.0));
+                if ui.button("Appliquer").clicked() { action = Action::ApplySize; }
+                ui.separator();
+                if ui.button("Ouvrir…").clicked()     { action = Action::OpenFile; }
+                if ui.button("Sauvegarder").clicked() { action = Action::SaveFile; }
+            });
+
+            // ── row 2: bomb count + solvability result + actions ──
+            ui.horizontal(|ui| {
+                let nb = ed.bomb_count();
+                ui.label(RichText::new(format!("{} bombe{}", nb, if nb != 1 { "s" } else { "" }))
+                    .color(Color32::from_rgb(230, 120, 0)));
+                ui.separator();
+                // Solvability result (auto-updated on every change)
+                match &ed.solvability {
+                    Some(SolvabilityStatus::Testing) => {
+                        ui.spinner();
+                        ui.label("Analyse…");
+                    }
+                    Some(SolvabilityStatus::Solvable { count, total }) => {
+                        ui.colored_label(
+                            Color32::from_rgb(80, 200, 80),
+                            format!("Résolvable ({}/{})", count, total),
+                        );
+                    }
+                    Some(SolvabilityStatus::Unsolvable { total }) => {
+                        ui.colored_label(
+                            Color32::from_rgb(220, 80, 80),
+                            format!("Non résolvable ({})", total),
+                        );
+                    }
+                    None => { ui.label("—"); }
+                }
+                ui.separator();
+                if ui.button("Effacer").clicked() { action = Action::Clear; }
+                ui.separator();
+                ui.add_enabled_ui(nb > 0, |ui| {
+                    if ui.button("▶  Jouer !").clicked() { action = Action::Play; }
+                });
+                if ui.button("Fermer").clicked() { action = Action::Close; }
+            });
+
+            if let Some(ref err) = ed.error {
+                ui.colored_label(Color32::from_rgb(255, 100, 100), err);
+            }
+
+            ui.separator();
+
+            // ── grid ────────────────────────────
+            let cols = ed.width;
+            let rows = ed.height;
+            let grid_size = vec2(cols as f32 * CELL, rows as f32 * CELL);
+            let (grid_rect, _) = ui.allocate_exact_size(grid_size, Sense::hover());
+
+            let hover_pos        = ctx.input(|i| i.pointer.hover_pos());
+            let primary_pressed  = ctx.input(|i| i.pointer.primary_pressed());
+            let primary_down     = ctx.input(|i| i.pointer.primary_down());
+            let primary_released = ctx.input(|i| i.pointer.primary_released());
+
+            if primary_released { ed.drag_value = None; }
+
+            let mut hovered: Option<(usize, usize)> = None;
+            if let Some(pos) = hover_pos {
+                if grid_rect.contains(pos) {
+                    let col = ((pos.x - grid_rect.left()) / CELL) as usize;
+                    let row = ((pos.y - grid_rect.top()) / CELL) as usize;
+                    if col < cols && row < rows {
+                        hovered = Some((col, row));
+                        if primary_pressed {
+                            ed.drag_value = Some(!ed.bombs[row * cols + col]);
+                        }
+                        if primary_down {
+                            if let Some(val) = ed.drag_value {
+                                ed.paint(col, row, val);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // draw cells
+            let painter = ui.painter();
+            let bg  = Color32::from_rgb(32, 32, 32);
+            let sep = Color32::from_rgb(18, 18, 18);
+            for row in 0..rows {
+                for col in 0..cols {
+                    let cr = Rect::from_min_size(
+                        grid_rect.min + vec2(col as f32 * CELL, row as f32 * CELL),
+                        Vec2::splat(CELL),
+                    );
+                    painter.rect_filled(cr, 0.0, bg);
+                    painter.rect_stroke(cr, 0.0, Stroke::new(1.0, sep), StrokeKind::Outside);
+                    if ed.bombs[row * cols + col] {
+                        draw_cat(painter, cr, Color32::from_rgb(230, 120, 0), &self.tex.cat);
+                    }
+                }
+            }
+
+            // hover highlight
+            if let Some((col, row)) = hovered {
+                let cr = Rect::from_min_size(
+                    grid_rect.min + vec2(col as f32 * CELL, row as f32 * CELL),
+                    Vec2::splat(CELL),
+                );
+                let placing = ed.drag_value.unwrap_or(!ed.bombs[row * cols + col]);
+                let tint = if placing {
+                    Color32::from_rgba_unmultiplied(230, 120, 0, 80)
+                } else {
+                    Color32::from_rgba_unmultiplied(80, 80, 200, 80)
+                };
+                painter.rect_filled(cr, 0.0, tint);
+                painter.rect_stroke(cr, 0.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Outside);
+            }
+        });
+
+        // ── apply action ──────────────────────
+        match action {
+            Action::ApplySize => { if ed.apply_size() { self.resize_pending = true; } }
+            Action::Clear     => { ed.clear(); }
+            Action::OpenFile  => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Grilles Bombicat", &["bombicat"])
+                    .pick_file()
+                {
+                    match EditorState::load(path) {
+                        Ok(new_ed) => { ed = new_ed; self.resize_pending = true; }
+                        Err(e)     => ed.error = Some(e),
+                    }
+                }
+            }
+            Action::SaveFile  => {
+                let path = ed.path.clone().or_else(|| {
+                    rfd::FileDialog::new()
+                        .add_filter("Grilles Bombicat", &["bombicat"])
+                        .set_file_name("grille.bombicat")
+                        .save_file()
+                });
+                if let Some(p) = path { ed.save(p); }
+            }
+            Action::Play  => {
+                let (w, h, bombs) = (ed.width, ed.height, ed.bombs.clone());
+                self.start_custom_game(w, h, bombs);
+                self.editor_solve_rx = None;
+                return; // editor closed
+            }
+            Action::Close => {
+                self.editor_solve_rx = None;
+                self.resize_pending = true;
+                return; // editor closed
+            }
+            Action::None => {}
+        }
+
+        // ── auto-trigger solvability test on any grid change ──
+        if ed.changed {
+            ed.changed = false;
+            let nb = ed.bomb_count();
+            if nb == 0 {
+                ed.solvability = None;
+                self.editor_solve_rx = None;
+            } else {
+                ed.solvability = Some(SolvabilityStatus::Testing);
+                let (w, h, bombs) = (ed.width, ed.height, ed.bombs.clone());
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx_clone = ctx.clone();
+                // Dropping the old receiver cancels the previous test's channel.
+                self.editor_solve_rx = Some(rx);
+                std::thread::spawn(move || {
+                    let result = count_solvable_starts(w, h, &bombs);
+                    tx.send(result).ok();
+                    ctx_clone.request_repaint();
+                });
+            }
+        }
+
+        self.editor = Some(ed);
     }
 }
