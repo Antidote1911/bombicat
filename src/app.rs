@@ -1176,7 +1176,11 @@ impl BombicatApp {
                 ui.add_space(4.0);
                 let lines: [(&str, &str); 6] = [
                     ("Clic gauche — découvrir une case", "Left click — reveal a cell"),
-                    ("Clic droit — drapeau, puis « ? », puis rien", "Right click — flag, then “?”, then nothing"),
+                    if self.prefs.question_marks {
+                        ("Clic droit — drapeau, puis « ? », puis rien", "Right click — flag, then “?”, then nothing")
+                    } else {
+                        ("Clic droit — poser / retirer un drapeau", "Right click — place / remove a flag")
+                    },
                     ("Clic sur un chiffre (ou milieu, ou gauche + droit) —", "Click on a number (or middle, or left + right) —"),
                     ("découvrir les voisines quand les drapeaux sont posés", "reveal its neighbours once the flags are placed"),
                     ("P — pause", "P — pause"),

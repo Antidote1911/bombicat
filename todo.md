@@ -50,10 +50,11 @@ Issu de la comparaison avec KMines (novembre 2026).
 - [x] Option pour désactiver les points d'interrogation
 - [x] Interface en anglais (suit la langue du système, modifiable)
 - [x] Explication des optimisations : `OPTIMISATION.txt`
+- [x] Vérifié en jeu : clic milieu, gauche+droit, sauvegarde d'un score après une victoire sans aide, mode `--cheat`
+- [x] « À Propos » : le texte du clic droit suit l'option des points d'interrogation
 
 ## Reste à faire
 
-- [ ] Vérifier en jeu : clic milieu, gauche+droit, mode `--cheat`, sauvegarde d'un score après une victoire sans aide
 - [ ] Fenêtre plafonnée à 90 % de l'écran : codé mais non vérifié sur un petit écran
 - [ ] Numéro de version et notes de version (toujours 1.1.0)
 - [ ] Biais des retouches : grilles ~7 % plus « aérées » qu'avec l'ancien tirage (voir `OPTIMISATION.txt`, §3.5)
