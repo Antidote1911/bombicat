@@ -1,0 +1,286 @@
+BOMBICAT — COMMENT LA GÉNÉRATION ET LE SOLVEUR ONT ÉTÉ OPTIMISÉS
+================================================================
+
+Ce document explique ce qui a changé dans src/model.rs entre la version 1.1.0
+et la version actuelle, pourquoi, et ce que ça donne en chiffres.
+
+
+0. EN DEUX PHRASES
+------------------
+
+Le solveur fait le même raisonnement qu'avant, environ 3 fois plus vite.
+Le générateur ne jette plus une grille au premier blocage : il la retouche
+localement, ce qui divise le nombre d'essais par 300 au niveau Chuck Norris.
+
+Temps moyen pour générer une grille Chuck Norris (40×25, 250 chats),
+sur UN seul cœur :
+
+    version 1.1.0 ...................... 3 587 ms
+    solveur optimisé ................... 1 684 ms
+    solveur optimisé + retouches .......    12 ms
+
+
+1. RAPPEL : COMMENT MARCHE LA GÉNÉRATION « SANS HASARD »
+--------------------------------------------------------
+
+Au premier clic, le jeu doit fabriquer une grille que l'on peut finir par pure
+logique, sans jamais deviner. Le principe n'a pas changé :
+
+  1. on place les chats au hasard (jamais sur la case cliquée ni ses 8 voisines) ;
+  2. un solveur joue la grille comme un joueur parfait mais honnête : il
+     n'utilise que les chiffres visibles ;
+  3. s'il arrive à tout découvrir, la grille est bonne.
+
+Le solveur applique trois règles, en boucle, jusqu'à ce que plus rien ne bouge :
+
+  Règle 1 — un chiffre seul.
+      Si un chiffre a autant de cases cachées que de chats restant à trouver,
+      ce sont toutes des chats. S'il n'a plus de chat à trouver, ses cases
+      cachées sont toutes sûres.
+
+  Règle 2 — deux chiffres comparés.
+      Soit A et B les cases cachées de deux chiffres, ra et rb leurs chats
+      restants, avec ra ≥ rb. On a toujours :
+          chats(A sans B) − chats(B sans A) = ra − rb
+      Donc si ra − rb est égal au nombre de cases de « A sans B », ces cases
+      sont toutes des chats et celles de « B sans A » sont toutes sûres.
+      (C'est le fameux motif 1-2 des démineurs, en version générale.)
+
+  Règle 3 — le compte global.
+      S'il reste autant de chats que de cases cachées, ce sont toutes des
+      chats ; s'il ne reste aucun chat, elles sont toutes sûres.
+
+Tout le coût de la génération tient en deux nombres :
+
+      temps  =  (nombre de grilles essayées)  ×  (temps du solveur par grille)
+
+J'ai attaqué les deux.
+
+
+2. LE SOLVEUR : MÊME RAISONNEMENT, MOINS DE TRAVAIL
+---------------------------------------------------
+
+2.1 Ne comparer que les chiffres voisins
+
+    Avant : pour la règle 2, le solveur comparait CHAQUE chiffre de la
+    frontière à TOUS les autres. Avec 300 chiffres visibles, cela fait
+    90 000 comparaisons par tour, et il y a des dizaines de tours.
+
+    Or deux chiffres ne peuvent avoir une case cachée en commun que s'ils
+    sont à 2 cases de distance au plus. Comparer un chiffre du coin haut
+    gauche avec un chiffre du coin bas droit ne peut rien donner.
+
+    Après : chaque chiffre n'est comparé qu'aux 24 cases du carré 5×5 qui
+    l'entoure. Avec 300 chiffres : 7 200 comparaisons au lieu de 90 000.
+    Le coût passe de « proportionnel au carré » à « proportionnel » au
+    nombre de chiffres.
+
+    Pour que ce soit exactement équivalent, il a fallu un détail : l'ancien
+    code, en comparant deux chiffres éloignés, retrouvait parfois par accident
+    une déduction de la règle 1. La règle 1 est donc maintenant appliquée
+    explicitement à chaque contrainte dans la même passe.
+
+2.2 Plus aucune allocation mémoire par case
+
+    Avant : pour chaque chiffre, à chaque tour, le solveur créait une liste
+    (Vec) de ses cases cachées, puis deux autres listes pour chaque paire
+    comparée. Des centaines de milliers de petites allocations par grille.
+
+    Après : une contrainte est une petite structure de taille fixe
+    (8 numéros de case au maximum, puisqu'une case a 8 voisines), rangée dans
+    un tableau alloué une seule fois par grille. Les différences d'ensembles
+    se calculent directement dessus, sans rien allouer.
+
+2.3 Des compteurs au lieu de recompter
+
+    Le nombre de cases découvertes et de chats prouvés est tenu à jour au
+    fur et à mesure. La règle 3 et le test « la grille est-elle finie ? »
+    deviennent instantanés au lieu de reparcourir toute la grille.
+
+2.4 Placement des chats
+
+    Avant : on tirait une case au hasard et on recommençait si elle était
+    déjà prise ou interdite (tirage avec rejet), puis on recalculait les
+    chiffres en regardant les 9 cases autour de CHAQUE case de la grille.
+
+    Après : tirage sans remise parmi les cases autorisées (aucun rejet, et
+    plus de boucle infinie possible si on demande trop de chats), et les
+    chiffres sont calculés en ajoutant 1 autour de chaque chat seulement.
+
+2.5 Comment je sais que le nouveau solveur dit la même chose que l'ancien
+
+    L'ancien solveur est conservé dans les tests comme référence. Un test
+    tire 3 200 grilles au hasard (8 tailles et densités différentes, départs
+    variés) et vérifie que les deux solveurs rendent le même verdict sur
+    chacune. Zéro désaccord.
+
+2.6 Gain mesuré (temps du solveur par grille essayée, sur un cœur)
+
+                              v1.1.0     optimisé    gain
+    Ultra Difficile 27×20     243 µs       98 µs     ×2,5
+    Géant           35×22     271 µs       89 µs     ×3,0
+    Chuck Norris    40×25     377 µs      125 µs     ×3,0
+
+
+3. LE GÉNÉRATEUR : RETOUCHER AU LIEU DE JETER
+---------------------------------------------
+
+3.1 Le problème
+
+    Avant : dès que le solveur bloquait quelque part, toute la grille partait
+    à la poubelle et on en tirait une neuve. Or une grille Chuck Norris a
+    1 000 cases : la probabilité qu'un tirage au hasard soit résoluble d'un
+    bout à l'autre est d'environ 1 sur 10 000. Il fallait donc essayer
+    environ 10 000 grilles, et la version 1.1.0 compensait en faisant
+    tourner tous les cœurs du processeur en parallèle (Rayon).
+
+    C'est du gâchis : quand le solveur bloque, il a souvent déjà résolu 90 %
+    de la grille. Le blocage tient à un petit coin (typiquement deux cases
+    dont une seule est un chat, sans aucun indice pour trancher).
+
+3.2 L'idée
+
+    Garder ce qui marche et ne refaire que le coin qui bloque :
+
+      1. tirer une grille au hasard et lancer le solveur ;
+      2. s'il bloque, choisir au hasard une case indécise au bord de la zone
+         résolue, et redistribuer au hasard les chats du carré 5×5 autour
+         d'elle (même nombre de chats, positions nouvelles) ;
+      3. relancer le solveur sur la grille retouchée, depuis le début ;
+      4. garder la retouche si le solveur découvre au moins autant de cases
+         qu'avant, sinon l'annuler ;
+      5. recommencer en 2 jusqu'à ce que la grille soit résolue.
+
+    Le solveur repart de zéro à chaque retouche : c'est lui, et lui seul, qui
+    déclare la grille bonne. La garantie « sans hasard » est donc exactement
+    la même qu'avant ; seule la façon de chercher une bonne grille change.
+
+    Pourquoi c'est tellement plus rapide : au lieu de devoir réussir d'un
+    coup un tirage de 1 000 cases, on réussit une suite de petits tirages de
+    25 cases, et chaque réussite est conservée.
+
+3.3 Gain mesuré
+
+    Nombre moyen de grilles essayées avant d'en trouver une bonne :
+
+                              v1.1.0    optimisé + retouches    gain
+    Ultra Difficile 27×20         38              10             ×4
+    Géant           35×22      2 388              26            ×90
+    Chuck Norris    40×25      9 514              31           ×300
+
+    Temps moyen (et pire cas observé) pour générer une grille, sur UN cœur :
+
+                              v1.1.0             solveur seul       + retouches
+    Ultra Difficile 27×20     9,3 ms (51 ms)     3,8 ms (11 ms)     1,2 ms (12 ms)
+    Géant           35×22     646 ms (2,3 s)     160 ms (0,6 s)     6,4 ms (45 ms)
+    Chuck Norris    40×25     3 587 ms (16 s)    1 684 ms (7,4 s)   11,9 ms (54 ms)
+
+    Sur les 32 threads de la machine de mesure, la version 1.1.0 mettait
+    311 ms en moyenne (jusqu'à 966 ms) pour une grille Chuck Norris.
+    La version actuelle met 12 ms avec un seul thread.
+
+3.4 Conséquence : Rayon a été supprimé
+
+    Avec une trentaine d'essais par grille, le parallélisme ne sert plus à
+    rien — pire, il ralentissait (le temps de réveiller 32 threads dépasse
+    le temps de calcul). La dépendance Rayon a été retirée : le jeu génère
+    sur un seul thread d'arrière-plan, et tourne aussi bien sur une vieille
+    machine à 2 cœurs que sur une station de travail.
+
+    La génération peut aussi être annulée (nouvelle partie pendant le
+    calcul) : avant, le thread continuait jusqu'à trouver une grille.
+
+3.5 Ce que ça coûte : un léger biais, mesuré
+
+    Retoucher jusqu'à ce que ça marche n'est pas tout à fait la même chose
+    que tirer au hasard parmi toutes les grilles résolubles : les retouches
+    favorisent un peu les dispositions faciles à résoudre. Je l'ai mesuré en
+    comparant les grilles produites par les deux méthodes :
+
+    Chuck Norris (40×25, 250 chats)        ancien tirage    retouches
+      cases vides (zéro voisin) par grille      86,0           92,0     (+7 %)
+      chats voisins par chat (regroupement)     1,871          1,935    (+3 %)
+      part des chats sur le bord                13,3 %         13,5 %
+
+    Ultra Difficile (27×20, 120 chats)
+      cases vides par grille                    65,6           69,5     (+6 %)
+      chats voisins par chat                    1,626          1,678    (+3 %)
+      part des chats sur le bord                17,5 %         17,5 %
+
+    Les grilles sont donc très légèrement plus « aérées » qu'avant.
+
+    Ma première version des retouches redistribuait TOUTE la zone indécise
+    d'un coup. Elle était aussi rapide, mais le biais était net : +23 % de
+    cases vides et +14 % de regroupement au niveau Chuck Norris, donc des
+    grilles sensiblement plus faciles. C'est pour cela que la retouche est
+    limitée à un carré 5×5 : le biais tombe à +7 % / +3 %, sans perte de
+    vitesse. Un carré 3×3 ne fait pas mieux (mêmes chiffres).
+
+
+4. LE SOLVEUR « AVANCÉ » (OPTION, DÉSACTIVÉE PAR DÉFAUT)
+--------------------------------------------------------
+
+Préférences → « Grilles à déductions avancées ».
+
+Les trois règles ci-dessus ne trouvent pas tout. Il existe des positions où
+aucun chiffre seul ni aucune paire ne permet de conclure, mais où, en
+examinant tous les placements possibles, on voit qu'une case est sûre dans
+tous les cas.
+
+Quand les règles simples bloquent, le solveur avancé :
+
+  1. découpe la frontière en zones indépendantes (des cases cachées reliées
+     entre elles par des chiffres communs) ;
+  2. pour chaque zone, essaie tous les placements de chats compatibles avec
+     les chiffres, par retour arrière : on décide case par case « chat » ou
+     « pas chat », et on abandonne une branche dès qu'un chiffre ne peut plus
+     être satisfait ;
+  3. tient compte du nombre total de chats restants (une zone ne peut pas en
+     contenir plus qu'il n'en reste, ni en laisser plus que les autres cases
+     cachées ne peuvent en accueillir) ;
+  4. conclut : une case sans chat dans TOUS les placements est sûre, une case
+     avec un chat dans TOUS les placements est un chat.
+
+Une zone trop grosse (plus de 20 000 branches explorées) est abandonnée : le
+solveur ne conclut alors rien dessus, ce qui reste toujours correct.
+
+Ce solveur n'accélère presque pas la génération (29 essais au lieu de 31 pour
+Chuck Norris) : les retouches suffisent. Son intérêt est ailleurs — il
+accepte des grilles qui demandent au joueur un raisonnement plus poussé. C'est
+pourquoi c'est une option, et pourquoi les scores obtenus avec sont classés à
+part. L'aide (Ctrl+H) utilise le même niveau de raisonnement que la grille.
+
+Vérification : en mode test, chaque déduction du solveur est comparée à la
+vraie grille (une case déclarée sûre ne doit jamais être un chat, et
+inversement). 1 200 grilles passent sans une seule déduction fausse, et le
+solveur avancé résout bien tout ce que le solveur simple résout, plus
+d'autres.
+
+
+5. L'AIDE (CTRL+H) UTILISE LE SOLVEUR
+-------------------------------------
+
+Avant, l'aide regardait la solution et désignait une case sûre au hasard au
+bord de la zone découverte — parfois une case impossible à déduire.
+
+Maintenant, elle lance le solveur sur ce que le joueur voit réellement
+(sans se fier à ses drapeaux, qui peuvent être faux) et désigne une case
+qu'il aurait pu trouver lui-même. Un test joue des parties entières en ne
+suivant que l'aide : elles se gagnent toutes sans jamais deviner.
+
+
+6. CONDITIONS DE MESURE
+-----------------------
+
+  - Processeur AMD Ryzen 9 7950X (16 cœurs / 32 threads), compilation
+    optimisée (--release).
+  - « Un cœur » : RAYON_NUM_THREADS=1 pour les anciennes versions ; la
+    version actuelle n'utilise de toute façon qu'un thread.
+  - Chaque ligne : 40 grilles pour les anciennes versions, 400 pour la
+    version actuelle, en alternant un premier clic au centre et dans un coin.
+  - Les temps varient d'une exécution à l'autre (surtout les pires cas) :
+    retenir les ordres de grandeur, pas la décimale.
+  - Statistiques de biais : 400 grilles (27×20) et 100 grilles (40×25) par
+    méthode, premier clic au centre.
+
+Pour relancer les tests :   cargo test

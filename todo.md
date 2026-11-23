@@ -38,13 +38,22 @@ Issu de la comparaison avec KMines (novembre 2026).
 - [x] Propagation itérative (plus de récursion) et logique de jeu déplacée dans `model.rs`
 - [x] Tests unitaires du modèle et du solveur (nouveau solveur comparé à l'ancien)
 
-## Plus tard
+## Deuxième passe
 
-- [?] Progression des niveaux : « Normal » (8 %) est moins dense que « Débutant » (10 %), puis trou entre 9 % et 22 %. Changer les niveaux rendrait les anciens scores incomparables → à décider.
-- [ ] Pause (chronomètre arrêté, grille masquée)
-- [ ] Option pour désactiver les points d'interrogation
-- [ ] Scores au dixième de seconde
-- [ ] Traduction anglaise de l'interface
-- [ ] Solveur plus fort (énumération par zones) pour accepter plus de grilles et accélérer « Chuck Norris »
-- [ ] Fenêtre plafonnée à 90 % de l'écran : codé mais non vérifié (l'écran de test était plus grand que la fenêtre)
-- [ ] Sauvegarde d'un score après une victoire sans aide : chemin inchangé, non rejoué pendant les tests
+- [x] Génération par retouches locales au lieu du rejet complet (Chuck Norris : ~31 essais au lieu de ~9 500, 12 ms sur un cœur)
+- [x] Rayon supprimé (devenu inutile)
+- [x] Solveur avancé (étude de tous les cas par zone), en option dans les préférences
+- [x] Progression des niveaux : Normal 25 → 40 chats, Difficile 35 → 62 (densités 10 %, 13 %, 17 %, 22 %, 25 %, 25 %)
+- [x] Scores rattachés à leurs règles : les anciens scores restent affichés, à part
+- [x] Scores au dixième de seconde
+- [x] Pause (touche P, chronomètre arrêté, grille masquée ; aussi quand une fenêtre est ouverte)
+- [x] Option pour désactiver les points d'interrogation
+- [x] Interface en anglais (suit la langue du système, modifiable)
+- [x] Explication des optimisations : `OPTIMISATION.txt`
+
+## Reste à faire
+
+- [ ] Vérifier en jeu : clic milieu, gauche+droit, mode `--cheat`, sauvegarde d'un score après une victoire sans aide
+- [ ] Fenêtre plafonnée à 90 % de l'écran : codé mais non vérifié sur un petit écran
+- [ ] Numéro de version et notes de version (toujours 1.1.0)
+- [ ] Biais des retouches : grilles ~7 % plus « aérées » qu'avec l'ancien tirage (voir `OPTIMISATION.txt`, §3.5)

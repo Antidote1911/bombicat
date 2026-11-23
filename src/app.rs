@@ -4,8 +4,8 @@ use std::sync::{mpsc::Receiver, Arc};
 
 use crate::{
     model::{generate_grid_no_guess, Field, Model, FLAG_NONE, FLAG_QUESTION, FLAG_SET},
-    scores::{self, Score},
-    settings::{Preferences, LEVEL_COUNT},
+    scores::{self, Table},
+    settings::{Lang, Preferences, LEVEL_COUNT},
 };
 
 #[derive(Clone, Copy)]
@@ -120,28 +120,63 @@ enum Modal {
     None,
     Settings(SettingsState),
     Scores(ScoresState),
-    SaveScore { time: i32 },
+    SaveScore { time_ms: i64 },
     About,
 }
 
 #[derive(Clone)]
 struct SettingsState {
-    level: usize,
+    prefs: Preferences,
 }
 
 /// Scores lus une seule fois à l'ouverture de la fenêtre.
 struct ScoresState {
-    tables: Vec<Vec<Score>>,
+    /// Par niveau : le classement des règles actuelles, puis les autres.
+    levels: Vec<Vec<Table>>,
     confirm_reset: bool,
 }
 
 impl ScoresState {
-    fn load() -> Self {
+    fn load(prefs: &Preferences) -> Self {
         Self {
-            tables: (0..LEVEL_COUNT).map(scores::top_ten).collect(),
+            levels: (0..LEVEL_COUNT)
+                .map(|level| scores::tables(level, &prefs.rules(level)))
+                .collect(),
             confirm_reset: false,
         }
     }
+}
+
+/// Choisit le texte selon la langue.
+fn tr(lang: Lang, fr: &'static str, en: &'static str) -> &'static str {
+    match lang {
+        Lang::Fr => fr,
+        Lang::En => en,
+    }
+}
+
+/// « 42,3 » en français, « 42.3 » en anglais.
+fn format_seconds(time_ms: i64, lang: Lang) -> String {
+    let tenths = time_ms / 100;
+    let sep = tr(lang, ",", ".");
+    format!("{}{}{}", tenths / 10, sep, tenths % 10)
+}
+
+/// « 20×15, 40 chats » à partir d'une signature de règles `20x15/40`
+/// (suivie de `+` pour les déductions avancées).
+fn rules_label(rules: &str, lang: Lang) -> String {
+    let (base, advanced) = match rules.strip_suffix('+') {
+        Some(base) => (base, true),
+        None => (rules, false),
+    };
+    let Some((size, cats)) = base.split_once('/') else {
+        return rules.to_string();
+    };
+    let mut label = format!("{}, {} {}", size.replace('x', "×"), cats, tr(lang, "chats", "cats"));
+    if advanced {
+        label += tr(lang, ", déductions avancées", ", advanced deductions");
+    }
+    label
 }
 
 // ──────────────────────────────────────────────
@@ -166,6 +201,9 @@ pub struct BombicatApp {
     hint: Option<HintState>,
     /// L'aide (ou la triche) a servi : la partie n'entre pas dans les scores.
     assisted: bool,
+    /// Pause demandée par le joueur (chronomètre arrêté, grille masquée).
+    paused: bool,
+    lang: Lang,
     input: GridInput,
     /// Place prise par tout ce qui n'est pas la grille (menu, barres, marges).
     chrome: Vec2,
@@ -174,6 +212,7 @@ pub struct BombicatApp {
 impl BombicatApp {
     pub fn new(cc: &eframe::CreationContext<'_>, cheat: bool) -> Self {
         let prefs = Preferences::load();
+        let lang = prefs.effective_lang();
         let tex = Textures::load(&cc.egui_ctx);
         let mut app = Self {
             model: Model::new(),
@@ -192,6 +231,8 @@ impl BombicatApp {
             popup_was_open: false,
             hint: None,
             assisted: false,
+            paused: false,
+            lang,
             input: GridInput::default(),
             chrome: vec2(16.0, 100.0),
         };
@@ -202,7 +243,7 @@ impl BombicatApp {
     fn new_game(&mut self) {
         let (w, h, s) = self.prefs.effective_dims();
         let size_changed = (w, h) != (self.model.width, self.model.height);
-        self.model.reset(w, h, s);
+        self.model.reset(w, h, s, self.prefs.logic());
         self.state = GameState::NotStarted;
         self.timer = 0.0;
         self.last_time = None;
@@ -210,14 +251,33 @@ impl BombicatApp {
         self.pending_gen = None; // annule une éventuelle génération en cours
         self.hint = None;
         self.assisted = false;
+        self.paused = false;
         self.input = GridInput::default();
         if size_changed {
             self.resize_pending = true;
         }
     }
 
+    fn t(&self, fr: &'static str, en: &'static str) -> &'static str {
+        tr(self.lang, fr, en)
+    }
+
+    /// Le chronomètre est arrêté et la grille masquée : pause demandée, ou
+    /// fenêtre (scores, préférences…) ouverte pendant une partie.
+    fn is_paused(&self) -> bool {
+        self.state == GameState::Running
+            && (self.paused || !matches!(self.modal, Modal::None))
+    }
+
+    fn toggle_pause(&mut self) {
+        if self.state == GameState::Running && matches!(self.modal, Modal::None) {
+            self.paused = !self.paused;
+            self.hint = None;
+        }
+    }
+
     fn trigger_hint(&mut self, ctx: &Context) {
-        if self.state != GameState::Running {
+        if self.state != GameState::Running || self.is_paused() {
             return;
         }
         if let Some((x, y)) = self.model.hint() {
@@ -259,12 +319,13 @@ impl BombicatApp {
             let cancel = Arc::new(AtomicBool::new(false));
             let (tx, rx) = std::sync::mpsc::channel();
             let (attempts_clone, cancel_clone) = (Arc::clone(&attempts), Arc::clone(&cancel));
+            let logic = self.prefs.logic();
             let ctx_clone = ctx.clone();
             let (width, height, total_cats) =
                 (self.model.width, self.model.height, self.model.total_cats());
             std::thread::spawn(move || {
                 let data = generate_grid_no_guess(
-                    width, height, total_cats, x, y, &attempts_clone, &cancel_clone,
+                    width, height, total_cats, x, y, logic, &attempts_clone, &cancel_clone,
                 );
                 tx.send(data).ok();
                 ctx_clone.request_repaint();
@@ -283,7 +344,7 @@ impl BombicatApp {
         if !matches!(self.state, GameState::NotStarted | GameState::Running) {
             return;
         }
-        self.model.toggle_mark(x, y);
+        self.model.toggle_mark(x, y, self.prefs.question_marks);
     }
 
     fn chord_click(&mut self, x: usize, y: usize) {
@@ -302,8 +363,8 @@ impl BombicatApp {
             self.state = GameState::Won;
             self.model.flag_remaining_cats();
             if !self.assisted {
-                let time = self.timer as i32;
-                self.modal = Modal::SaveScore { time };
+                let time_ms = (self.timer * 1000.0).round() as i64;
+                self.modal = Modal::SaveScore { time_ms };
             }
         }
     }
@@ -489,7 +550,7 @@ impl eframe::App for BombicatApp {
         self.popup_was_open = ctx.memory(|m| m.any_popup_open());
 
         // advance timer
-        if self.state == GameState::Running {
+        if self.state == GameState::Running && !self.is_paused() {
             let now = ctx.input(|i| i.time);
             if let Some(last) = self.last_time {
                 self.timer += now - last;
@@ -535,34 +596,46 @@ impl eframe::App for BombicatApp {
 
 impl BombicatApp {
     fn draw_menubar(&mut self, ctx: &Context) {
+        let running = self.state == GameState::Running;
         TopBottomPanel::top("menu").show(ctx, |ui| {
             menu::bar(ui, |ui| {
-                ui.menu_button("Fichier", |ui| {
-                    if ui.button("Nouvelle Partie  Ctrl+N").clicked() {
+                ui.menu_button(self.t("Fichier", "Game"), |ui| {
+                    if ui.add(Button::new(self.t("Nouvelle Partie", "New Game")).shortcut_text("Ctrl+N")).clicked() {
                         self.new_game();
                         ui.close_menu();
                     }
-                    ui.add_enabled_ui(self.state == GameState::Running, |ui| {
-                        if ui.button("Aide             Ctrl+H").clicked() {
+                    ui.add_enabled_ui(running, |ui| {
+                        let pause_label = if self.paused {
+                            self.t("Reprendre", "Resume")
+                        } else {
+                            self.t("Pause", "Pause")
+                        };
+                        if ui.add(Button::new(pause_label).shortcut_text("P")).clicked() {
+                            self.toggle_pause();
+                            ui.close_menu();
+                        }
+                    });
+                    ui.add_enabled_ui(running && !self.paused, |ui| {
+                        if ui.add(Button::new(self.t("Aide", "Hint")).shortcut_text("Ctrl+H")).clicked() {
                             self.trigger_hint(ctx);
                             ui.close_menu();
                         }
                     });
-                    if ui.button("Meilleurs Scores").clicked() {
-                        self.modal = Modal::Scores(ScoresState::load());
+                    if ui.button(self.t("Meilleurs Scores", "High Scores")).clicked() {
+                        self.modal = Modal::Scores(ScoresState::load(&self.prefs));
                         ui.close_menu();
                     }
-                    if ui.button("Préférences").clicked() {
-                        self.modal = Modal::Settings(SettingsState { level: self.prefs.level });
+                    if ui.button(self.t("Préférences", "Preferences")).clicked() {
+                        self.modal = Modal::Settings(SettingsState { prefs: self.prefs.clone() });
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Quitter").clicked() {
+                    if ui.button(self.t("Quitter", "Quit")).clicked() {
                         ctx.send_viewport_cmd(ViewportCommand::Close);
                     }
                 });
-                ui.menu_button("Infos", |ui| {
-                    if ui.button("À Propos").clicked() {
+                ui.menu_button(self.t("Infos", "Info"), |ui| {
+                    if ui.button(self.t("À Propos", "About")).clicked() {
                         self.modal = Modal::About;
                         ui.close_menu();
                     }
@@ -578,21 +651,43 @@ impl BombicatApp {
         if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::H))) {
             self.trigger_hint(ctx);
         }
+        // P : pause (pas pendant la saisie d'un nom ou une autre fenêtre)
+        if matches!(self.modal, Modal::None)
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::P))
+        {
+            self.toggle_pause();
+        }
     }
 
     fn draw_statusbar(&mut self, ctx: &Context) {
         TopBottomPanel::bottom("status").show(ctx, |ui| {
-            let (_, _, cats) = Preferences::level_params(self.prefs.level);
-            let level_name = Preferences::level_name(self.prefs.level);
+            let lang = self.lang;
+            let cats = self.model.total_cats();
+            let mut level = Preferences::level_name(self.prefs.level, lang).to_string();
+            if self.prefs.advanced_logic {
+                level += tr(lang, " (déductions avancées)", " (advanced deductions)");
+            }
             let text = match self.state {
-                GameState::Lost => "Malheureusement, tu as perdu.".into(),
-                GameState::Won if self.assisted => "Tu as gagné ! (avec aide : pas de score)".into(),
-                GameState::Won => "Tu as gagné !".into(),
-                _ if self.gen_attempts == 0 => format!("{} — {} BombaCat", level_name, cats),
-                _ => format!("{} — {} BombaCat  (grille résoluble générée en {} essai{}.)",
-                    level_name, cats,
-                    self.gen_attempts,
-                    if self.gen_attempts > 1 { "s" } else { "" }),
+                GameState::Lost => self.t("Malheureusement, tu as perdu.", "Sorry, you lost.").to_string(),
+                GameState::Won if self.assisted => self
+                    .t("Tu as gagné ! (avec aide : pas de score)", "You won! (with hints: no score)")
+                    .to_string(),
+                GameState::Won => self.t("Tu as gagné !", "You won!").to_string(),
+                _ if self.paused => self.t("Pause", "Paused").to_string(),
+                _ if self.gen_attempts == 0 => format!("{level} — {cats} BombaCat"),
+                _ => {
+                    let n = self.gen_attempts;
+                    match lang {
+                        Lang::Fr => format!(
+                            "{level} — {cats} BombaCat  (grille résoluble générée en {n} essai{}.)",
+                            if n > 1 { "s" } else { "" }
+                        ),
+                        Lang::En => format!(
+                            "{level} — {cats} BombaCat  (solvable grid generated in {n} attempt{}.)",
+                            if n > 1 { "s" } else { "" }
+                        ),
+                    }
+                }
             };
             ui.add(Label::new(text).truncate());
         });
@@ -716,6 +811,12 @@ impl BombicatApp {
 
             if !input_ok {
                 self.input = GridInput::default();
+            } else if self.paused {
+                // Un clic sur la grille reprend la partie, sans rien jouer.
+                self.input = GridInput::default();
+                if l_pressed && grid_resp.contains_pointer() && hovered.is_some() {
+                    self.paused = false;
+                }
             } else {
                 if (l_pressed || r_pressed || m_pressed)
                     && !self.input.armed
@@ -803,14 +904,18 @@ impl BombicatApp {
             // ── paint cells ──────────────────
             // (après le traitement des clics : l'image montre déjà le résultat)
             let active = matches!(self.state, GameState::NotStarted | GameState::Running);
+            let hidden = self.is_paused();
+            let blank = Field::default();
             let exploded = self.model.exploded();
             let painter = ui.painter();
             for row in 0..rows {
                 for col in 0..cols {
+                    // En pause, la grille est masquée : pas de réflexion gratuite.
+                    let field = if hidden { &blank } else { self.model.field(col, row) };
                     Self::draw_cell(
                         painter,
                         cell_rect(col, row),
-                        self.model.field(col, row),
+                        field,
                         active,
                         pressed_cells.contains(&(col, row)),
                         exploded == Some((col, row)),
@@ -818,12 +923,20 @@ impl BombicatApp {
                     );
                 }
             }
+            if self.paused && self.state == GameState::Running {
+                painter.text(
+                    grid_rect.center(), Align2::CENTER_CENTER,
+                    self.t("Pause — clic ou P pour reprendre", "Paused — click or P to resume"),
+                    FontId::proportional(18.0),
+                    Color32::LIGHT_GRAY,
+                );
+            }
 
             // hint blink overlay
             if let Some(hint) = self.hint {
                 let now = ctx.input(|i| i.time);
                 let elapsed = now - hint.start_time;
-                if active && elapsed < 5.0 && hint.x < cols && hint.y < rows {
+                if active && !hidden && elapsed < 5.0 && hint.x < cols && hint.y < rows {
                     let blink_on = (elapsed * 2.5) as i32 % 2 == 0;
                     if blink_on {
                         let cr = cell_rect(hint.x, hint.y);
@@ -847,8 +960,8 @@ impl BombicatApp {
         egui::Modal::new(Id::new("generating_modal"))
             .backdrop_color(Color32::TRANSPARENT)
             .show(ctx, |ui| {
-                ui.label("Test de résolubilité en cours...");
-                ui.label(format!("{} essais", n));
+                ui.label(self.t("Test de résolubilité en cours...", "Looking for a solvable grid..."));
+                ui.label(format!("{} {}", n, self.t("essais", "attempts")));
             });
     }
 
@@ -865,36 +978,76 @@ impl BombicatApp {
     fn draw_settings_modal(&mut self, ctx: &Context) {
         let Modal::Settings(ref st) = self.modal else { return };
         let mut st = st.clone();
+        let lang = self.lang;
 
         #[derive(PartialEq)] enum Action { None, Ok, Cancel }
         let mut action = Action::None;
 
         let resp = egui::Modal::new(Id::new("settings_modal")).backdrop_color(Color32::TRANSPARENT).show(ctx, |ui| {
-            ui.heading("Préférences");
+            ui.heading(tr(lang, "Préférences", "Preferences"));
             ui.separator();
             ui.horizontal(|ui| {
-                ui.label("Difficulté:");
+                ui.label(tr(lang, "Difficulté :", "Difficulty:"));
                 ComboBox::from_id_salt("lvl")
-                    .selected_text(Preferences::level_name(st.level))
+                    .selected_text(Preferences::level_name(st.prefs.level, lang))
                     .show_ui(ui, |ui| {
                         for level in 0..LEVEL_COUNT {
-                            ui.selectable_value(&mut st.level, level, Preferences::level_name(level));
+                            let (w, h, cats) = Preferences::level_params(level);
+                            let label = format!(
+                                "{} — {w}×{h}, {cats} {}",
+                                Preferences::level_name(level, lang),
+                                tr(lang, "chats", "cats"),
+                            );
+                            ui.selectable_value(&mut st.prefs.level, level, label);
+                        }
+                    });
+            });
+            ui.checkbox(
+                &mut st.prefs.advanced_logic,
+                tr(lang, "Grilles à déductions avancées", "Grids with advanced deductions"),
+            )
+            .on_hover_text(tr(
+                lang,
+                "Toujours sans hasard, mais il faut parfois étudier tous les cas \
+                 possibles sur une zone. Scores classés à part.",
+                "Still no guessing, but you sometimes have to work through every \
+                 possible case in an area. Scores are ranked separately.",
+            ));
+            ui.checkbox(
+                &mut st.prefs.question_marks,
+                tr(lang, "Points d'interrogation (clic droit)", "Question marks (right click)"),
+            );
+            ui.horizontal(|ui| {
+                ui.label(tr(lang, "Langue :", "Language:"));
+                let auto = tr(lang, "Système", "System");
+                ComboBox::from_id_salt("lang")
+                    .selected_text(st.prefs.lang.map_or(auto, Lang::name))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut st.prefs.lang, None, auto);
+                        for l in [Lang::Fr, Lang::En] {
+                            ui.selectable_value(&mut st.prefs.lang, Some(l), l.name());
                         }
                     });
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("OK").clicked()      { action = Action::Ok; }
-                if ui.button("Annuler").clicked() { action = Action::Cancel; }
+                if ui.button("OK").clicked() { action = Action::Ok; }
+                if ui.button(tr(lang, "Annuler", "Cancel")).clicked() { action = Action::Cancel; }
             });
         });
 
         match action {
             Action::Ok => {
-                self.prefs.level = st.level;
+                // Seuls le niveau et le type de grille imposent une nouvelle partie.
+                let restart = st.prefs.level != self.prefs.level
+                    || st.prefs.advanced_logic != self.prefs.advanced_logic;
+                self.prefs = st.prefs;
                 self.prefs.save();
-                self.new_game();
+                self.lang = self.prefs.effective_lang();
                 self.modal = Modal::None;
+                if restart {
+                    self.new_game();
+                }
             }
             Action::Cancel => { self.modal = Modal::None; }
             Action::None if resp.should_close() => { self.modal = Modal::None; }
@@ -905,6 +1058,7 @@ impl BombicatApp {
     }
 
     fn draw_scores_modal(&mut self, ctx: &Context) {
+        let lang = self.lang;
         let Modal::Scores(ref mut st) = self.modal else { return };
         let mut close = false;
         let mut reset = false;
@@ -912,22 +1066,38 @@ impl BombicatApp {
 
         let w = screen.width() * 0.85;
         let mut open = true;
-        Window::new("Meilleurs Scores")
+        Window::new(tr(lang, "Meilleurs Scores", "High Scores"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .fixed_size(vec2(w, screen.height() * 0.75))
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
+                let list = |ui: &mut Ui, table: &Table| {
+                    for (i, s) in table.scores.iter().enumerate() {
+                        ui.label(format!(
+                            "{}. {} — {} s",
+                            i + 1, s.name, format_seconds(s.time_ms, lang),
+                        ));
+                    }
+                };
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (level, top) in st.tables.iter().enumerate() {
-                        ui.collapsing(Preferences::level_name(level), |ui| {
-                            if top.is_empty() {
-                                ui.label("Aucun score.");
+                    for (level, tables) in st.levels.iter().enumerate() {
+                        ui.collapsing(Preferences::level_name(level, lang), |ui| {
+                            // tables[0] : les règles actuelles ; ensuite les autres.
+                            if tables[0].scores.is_empty() {
+                                ui.label(tr(lang, "Aucun score.", "No score yet."));
                             } else {
-                                for (i, s) in top.iter().enumerate() {
-                                    ui.label(format!("{}. {} — {} s", i + 1, s.name, s.time));
-                                }
+                                list(ui, &tables[0]);
+                            }
+                            for table in &tables[1..] {
+                                ui.add_space(4.0);
+                                ui.weak(format!(
+                                    "{} ({}) :",
+                                    tr(lang, "Autres règles", "Other rules"),
+                                    rules_label(&table.rules, lang),
+                                ));
+                                list(ui, table);
                             }
                         });
                     }
@@ -936,78 +1106,91 @@ impl BombicatApp {
                 if st.confirm_reset {
                     ui.colored_label(
                         Color32::from_rgb(255, 100, 100),
-                        "Effacer définitivement tous les scores ?",
+                        tr(lang, "Effacer définitivement tous les scores ?", "Permanently erase all scores?"),
                     );
                     ui.horizontal(|ui| {
                         // « Annuler » en premier : c'est lui qui se retrouve sous
                         // la souris, un double-clic n'efface donc rien.
-                        if ui.button("Annuler").clicked() { st.confirm_reset = false; }
-                        if ui.button("Oui, tout effacer").clicked() { reset = true; }
+                        if ui.button(tr(lang, "Annuler", "Cancel")).clicked() { st.confirm_reset = false; }
+                        if ui.button(tr(lang, "Oui, tout effacer", "Yes, erase everything")).clicked() { reset = true; }
                     });
                 } else {
                     ui.horizontal(|ui| {
-                        if ui.button("Réinitialiser…").clicked() { st.confirm_reset = true; }
-                        if ui.button("Fermer").clicked() { close = true; }
+                        if ui.button(tr(lang, "Réinitialiser…", "Reset…")).clicked() { st.confirm_reset = true; }
+                        if ui.button(tr(lang, "Fermer", "Close")).clicked() { close = true; }
                     });
                 }
             });
 
         if reset {
             let _ = scores::reset_all();
-            self.modal = Modal::Scores(ScoresState::load());
+            self.modal = Modal::Scores(ScoresState::load(&self.prefs));
         } else if close || !open {
             self.modal = Modal::None;
         }
     }
 
     fn draw_savescore_modal(&mut self, ctx: &Context) {
-        let Modal::SaveScore { time } = self.modal else { return };
+        let Modal::SaveScore { time_ms } = self.modal else { return };
+        let lang = self.lang;
         let level = self.prefs.level;
+        let rules = self.prefs.rules(level);
         let mut done = false;
 
         egui::Modal::new(Id::new("savescore_modal")).backdrop_color(Color32::TRANSPARENT).show(ctx, |ui| {
-            ui.heading("Victoire !");
-            ui.label(format!("Tu as gagné en {} secondes !", time));
+            ui.heading(tr(lang, "Victoire !", "Victory!"));
+            let seconds = format_seconds(time_ms, lang);
+            ui.label(match lang {
+                Lang::Fr => format!("Tu as gagné en {seconds} secondes !"),
+                Lang::En => format!("You won in {seconds} seconds!"),
+            });
             ui.add_space(4.0);
-            ui.label("Entre ton nom :");
+            ui.label(tr(lang, "Entre ton nom :", "Enter your name:"));
             ui.text_edit_singleline(&mut self.save_name);
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("Sauvegarder").clicked() {
+                if ui.button(tr(lang, "Sauvegarder", "Save")).clicked() {
                     let name = self.save_name.trim().to_string();
                     if !name.is_empty() {
-                        let _ = scores::insert(&name, time, level);
+                        let _ = scores::insert(&name, time_ms, level, &rules);
                         self.save_name.clear();
                         done = true;
                     }
                 }
-                if ui.button("Ignorer").clicked() { done = true; }
+                if ui.button(tr(lang, "Ignorer", "Skip")).clicked() { done = true; }
             });
         });
         if done { self.modal = Modal::None; }
     }
 
     fn draw_about_modal(&mut self, ctx: &Context) {
+        let lang = self.lang;
         let mut close = false;
         let resp = egui::Modal::new(Id::new("about_modal")).backdrop_color(Color32::TRANSPARENT).show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.heading("Bombicat");
                 ui.label(format!("version {}", env!("CARGO_PKG_VERSION")));
-                ui.label("Un démineur avec des chats.");
+                ui.label(tr(lang, "Un démineur avec des chats.", "A minesweeper with cats."));
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
-                ui.label("Clic gauche — découvrir une case");
-                ui.label("Clic droit — drapeau, puis « ? », puis rien");
-                ui.label("Clic sur un chiffre (ou milieu, ou gauche + droit) —");
-                ui.label("découvrir les voisines quand les drapeaux sont posés");
-                ui.label("Ctrl+H — aide (la partie ne compte plus pour les scores)");
+                let lines: [(&str, &str); 6] = [
+                    ("Clic gauche — découvrir une case", "Left click — reveal a cell"),
+                    ("Clic droit — drapeau, puis « ? », puis rien", "Right click — flag, then “?”, then nothing"),
+                    ("Clic sur un chiffre (ou milieu, ou gauche + droit) —", "Click on a number (or middle, or left + right) —"),
+                    ("découvrir les voisines quand les drapeaux sont posés", "reveal its neighbours once the flags are placed"),
+                    ("P — pause", "P — pause"),
+                    ("Ctrl+H — aide (la partie ne compte plus pour les scores)", "Ctrl+H — hint (the game no longer counts for scores)"),
+                ];
+                for (fr, en) in lines {
+                    ui.label(tr(lang, fr, en));
+                }
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
-                ui.label("Icônes : Freepik — flaticon.com (CC BY 3.0)");
+                ui.label(tr(lang, "Icônes : Freepik — flaticon.com (CC BY 3.0)", "Icons: Freepik — flaticon.com (CC BY 3.0)"));
                 ui.add_space(8.0);
-                if ui.button("  Fermer  ").clicked() { close = true; }
+                if ui.button(tr(lang, "  Fermer  ", "  Close  ")).clicked() { close = true; }
             });
         });
         if close || resp.should_close() { self.modal = Modal::None; }
