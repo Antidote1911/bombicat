@@ -52,9 +52,10 @@ Issu de la comparaison avec KMines (novembre 2026).
 - [x] Explication des optimisations : `OPTIMISATION.txt`
 - [x] Vérifié en jeu : clic milieu, gauche+droit, sauvegarde d'un score après une victoire sans aide, mode `--cheat`
 - [x] « À Propos » : le texte du clic droit suit l'option des points d'interrogation
+- [x] Fenêtre plafonnée à 90 % de l'écran : vérifié sur un écran 1024×600 (fenêtre 922×540, Chuck Norris jouable)
+- [x] Parties complètes jouées sans aide par un script qui lit l'écran et n'applique que les règles simples : 4 Débutant et 1 Ultra Difficile gagnées, 212 révélations sur chiffre réussies sur 212 (clic gauche, milieu, gauche+droit dans les deux ordres), score enregistré au dixième avec ses règles
 
 ## Reste à faire
 
-- [ ] Fenêtre plafonnée à 90 % de l'écran : codé mais non vérifié sur un petit écran
 - [ ] Numéro de version et notes de version (toujours 1.1.0)
 - [ ] Biais des retouches : grilles ~7 % plus « aérées » qu'avec l'ancien tirage (voir `OPTIMISATION.txt`, §3.5)
