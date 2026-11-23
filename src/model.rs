@@ -1,22 +1,48 @@
 use rand::prelude::*;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+pub const FLAG_NONE: u8 = 0;
+pub const FLAG_SET: u8 = 1;
+pub const FLAG_QUESTION: u8 = 2;
 
 #[derive(Clone, Debug, Default)]
 pub struct Field {
     pub cat: bool,
     pub discovered: bool,
-    pub flag: u8, // 0=none, 1=flag, 2=question
+    pub flag: u8, // FLAG_NONE, FLAG_SET ou FLAG_QUESTION
     pub neighbours: u8,
 }
+
+/// Appelle `f` pour chacune des (au plus) 8 cases voisines de `idx`.
+#[inline]
+fn for_each_neighbour(width: usize, height: usize, idx: usize, mut f: impl FnMut(usize)) {
+    let x = idx % width;
+    let y = idx / width;
+    let x0 = x.saturating_sub(1);
+    let x1 = (x + 1).min(width - 1);
+    let y0 = y.saturating_sub(1);
+    let y1 = (y + 1).min(height - 1);
+    for ny in y0..=y1 {
+        for nx in x0..=x1 {
+            let nidx = ny * width + nx;
+            if nidx != idx {
+                f(nidx);
+            }
+        }
+    }
+}
+
+// ── modèle de jeu ─────────────────────────────────────────────────────────
 
 pub struct Model {
     pub width: usize,
     pub height: usize,
     total_cats: usize,
     discovered_count: usize,
+    flag_count: usize,
+    exploded: Option<usize>,
     pub data: Vec<Field>,
-    rng: StdRng,
 }
 
 impl Model {
@@ -26,461 +52,766 @@ impl Model {
             height: 0,
             total_cats: 0,
             discovered_count: 0,
+            flag_count: 0,
+            exploded: None,
             data: Vec::new(),
-            rng: StdRng::from_entropy(),
         }
     }
 
+    /// Grille vide (les chats sont placés au premier clic, voir `install`).
     pub fn reset(&mut self, width: usize, height: usize, cats: usize) {
         self.width = width;
         self.height = height;
         self.total_cats = cats;
         self.discovered_count = 0;
+        self.flag_count = 0;
+        self.exploded = None;
         self.data = vec![Field::default(); width * height];
-        self.rng = StdRng::from_entropy();
     }
 
-    pub fn is_valid(&self, x: i32, y: i32) -> bool {
-        x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32
+    /// Installe une grille générée en conservant les marques (drapeaux, `?`)
+    /// que le joueur a posées avant son premier clic.
+    pub fn install(&mut self, mut data: Vec<Field>) {
+        debug_assert_eq!(data.len(), self.data.len());
+        for (new, old) in data.iter_mut().zip(self.data.iter()) {
+            new.flag = old.flag;
+            new.discovered = false;
+        }
+        self.total_cats = data.iter().filter(|f| f.cat).count();
+        self.discovered_count = 0;
+        self.exploded = None;
+        self.data = data;
     }
 
     pub fn field(&self, x: usize, y: usize) -> &Field {
         &self.data[y * self.width + x]
     }
 
-    #[allow(dead_code)]
-    pub fn field_mut(&mut self, x: usize, y: usize) -> &mut Field {
-        &mut self.data[y * self.width + x]
-    }
-
-    pub fn discover(&mut self, x: usize, y: usize) {
-        let f = &mut self.data[y * self.width + x];
-        if !f.discovered && f.flag == 0 {
-            f.discovered = true;
-            self.discovered_count += 1;
-        }
-    }
-
-    pub fn disarm(&mut self, x: usize, y: usize) -> i32 {
-        let f = &mut self.data[y * self.width + x];
-        if f.discovered {
-            return 0;
-        }
-        let old = f.flag;
-        f.flag = (f.flag + 1) % 3;
-        let new = f.flag;
-        // returns delta for cat_display: -1 when flag placed, +1 when flag removed
-        if old == 0 && new == 1 {
-            -1
-        } else if old == 1 && new == 2 {
-            1
-        } else {
-            0
-        }
-    }
-
-    pub fn get_flag(&self, x: i32, y: i32) -> bool {
-        self.is_valid(x, y) && self.data[y as usize * self.width + x as usize].flag == 1
-    }
-
-    pub fn count_flags_around(&self, x: usize, y: usize) -> u8 {
-        let mut count = 0u8;
-        for dy in -1i32..=1 {
-            for dx in -1i32..=1 {
-                if dx == 0 && dy == 0 {
-                    continue;
-                }
-                if self.get_flag(x as i32 + dx, y as i32 + dy) {
-                    count += 1;
-                }
-            }
-        }
-        count
-    }
-
-    pub fn check_win(&self) -> bool {
-        let size = self.width * self.height;
-        (size - self.discovered_count).saturating_sub(self.total_cats) == 0
-    }
-
-    #[allow(dead_code)]
     pub fn total_cats(&self) -> usize {
         self.total_cats
     }
 
-    pub fn any_discovered_cat(&self) -> bool {
-        self.data.iter().any(|f| f.discovered && f.cat)
+    /// Chats restants à marquer (peut être négatif si trop de drapeaux).
+    pub fn cats_left(&self) -> i32 {
+        self.total_cats as i32 - self.flag_count as i32
     }
 
-    pub fn find_exploded(&self) -> Option<(usize, usize)> {
-        self.data.iter().enumerate().find(|(_, f)| f.discovered && f.cat).map(|(id, _)| {
-            (id % self.width, id / self.width)
-        })
+    /// Case du chat qui a explosé, si la partie est perdue.
+    pub fn exploded(&self) -> Option<(usize, usize)> {
+        self.exploded.map(|idx| (idx % self.width, idx / self.width))
     }
 
-    pub fn load_custom(&mut self, width: usize, height: usize, bombs: &[bool]) {
-        self.width = width;
-        self.height = height;
-        self.total_cats = bombs.iter().filter(|&&b| b).count();
-        self.discovered_count = 0;
-        self.data = bombs.iter().map(|&cat| Field { cat, ..Default::default() }).collect();
-        for y in 0..height {
-            for x in 0..width {
-                let mut count = 0u8;
-                for dy in -1i32..=1 {
-                    for dx in -1i32..=1 {
-                        if dx == 0 && dy == 0 { continue; }
-                        let nx = x as i32 + dx;
-                        let ny = y as i32 + dy;
-                        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32
-                            && self.data[ny as usize * width + nx as usize].cat
-                        {
-                            count += 1;
-                        }
-                    }
-                }
-                self.data[y * width + x].neighbours = count;
+    pub fn is_won(&self) -> bool {
+        self.exploded.is_none()
+            && self.discovered_count + self.total_cats == self.width * self.height
+    }
+
+    /// Découvre une case ; si elle est vide (0 voisin), propage aux voisines.
+    /// Les cases marquées ne sont jamais découvertes.
+    pub fn reveal(&mut self, x: usize, y: usize) {
+        let (width, height) = (self.width, self.height);
+        let mut stack = vec![y * width + x];
+        while let Some(idx) = stack.pop() {
+            let f = &mut self.data[idx];
+            if f.discovered || f.flag != FLAG_NONE {
+                continue;
+            }
+            f.discovered = true;
+            if f.cat {
+                self.exploded.get_or_insert(idx);
+                continue;
+            }
+            self.discovered_count += 1;
+            if f.neighbours == 0 {
+                for_each_neighbour(width, height, idx, |n| stack.push(n));
             }
         }
     }
 
+    /// Sur un chiffre découvert entouré d'autant de drapeaux que sa valeur,
+    /// découvre toutes les voisines non marquées. Renvoie `true` si l'action
+    /// a été appliquée.
+    pub fn chord(&mut self, x: usize, y: usize) -> bool {
+        let idx = y * self.width + x;
+        let f = &self.data[idx];
+        if !f.discovered || f.cat || f.neighbours == 0 {
+            return false;
+        }
+        let mut flags = 0u8;
+        let mut targets = Vec::with_capacity(8);
+        for_each_neighbour(self.width, self.height, idx, |n| {
+            let nf = &self.data[n];
+            if nf.flag == FLAG_SET {
+                flags += 1;
+            } else if !nf.discovered && nf.flag == FLAG_NONE {
+                targets.push(n);
+            }
+        });
+        if flags != f.neighbours || targets.is_empty() {
+            return false;
+        }
+        for n in targets {
+            self.reveal(n % self.width, n / self.width);
+        }
+        true
+    }
+
+    /// Fait tourner la marque d'une case cachée : rien → drapeau → `?` → rien.
+    pub fn toggle_mark(&mut self, x: usize, y: usize) {
+        let f = &mut self.data[y * self.width + x];
+        if f.discovered {
+            return;
+        }
+        if f.flag == FLAG_SET {
+            self.flag_count -= 1;
+        }
+        f.flag = (f.flag + 1) % 3;
+        if f.flag == FLAG_SET {
+            self.flag_count += 1;
+        }
+    }
+
+    /// À la victoire : pose un drapeau sur tous les chats restants.
+    pub fn flag_remaining_cats(&mut self) {
+        for f in &mut self.data {
+            if f.cat && !f.discovered {
+                f.flag = FLAG_SET;
+            } else if !f.cat && f.flag != FLAG_NONE {
+                f.flag = FLAG_NONE;
+            }
+        }
+        self.flag_count = self.data.iter().filter(|f| f.flag == FLAG_SET).count();
+    }
+
+    /// Mode triche : tout découvrir.
+    pub fn reveal_all(&mut self) {
+        for f in &mut self.data {
+            f.discovered = true;
+        }
+    }
+
+    /// Case sûre que le joueur peut déduire de ce qui est visible.
+    /// Ses drapeaux ne servent pas à la déduction (ils peuvent être faux).
+    pub fn deducible_safe(&self) -> Option<(usize, usize)> {
+        if self.exploded.is_some() || self.data.is_empty() {
+            return None;
+        }
+        let discovered: Vec<bool> = self.data.iter().map(|f| f.discovered).collect();
+        let mut solver =
+            Solver::with_state(&self.data, self.width, self.height, self.total_cats, discovered);
+        solver.collect_safe = true;
+        solver.run();
+        // De préférence une case que le joueur n'a pas marquée ; sinon une
+        // case marquée à tort (son drapeau est faux).
+        solver.safe_found.iter()
+            .find(|&&idx| self.data[idx].flag == FLAG_NONE)
+            .or(solver.safe_found.first())
+            .map(|&idx| (idx % self.width, idx / self.width))
+    }
+
+    /// Case à suggérer au joueur : une case déductible si possible,
+    /// sinon une case sûre au bord de la zone découverte.
+    pub fn hint(&self) -> Option<(usize, usize)> {
+        if let Some(pos) = self.deducible_safe() {
+            return Some(pos);
+        }
+        let (width, height) = (self.width, self.height);
+        let safe_hidden = |idx: &usize| !self.data[*idx].discovered && !self.data[*idx].cat;
+        let on_frontier = |idx: &usize| {
+            let mut found = false;
+            for_each_neighbour(width, height, *idx, |n| found |= self.data[n].discovered);
+            found
+        };
+        (0..self.data.len())
+            .filter(safe_hidden)
+            .find(on_frontier)
+            .or_else(|| (0..self.data.len()).find(safe_hidden))
+            .map(|idx| (idx % width, idx / width))
+    }
 }
 
-// ── solvability helpers (public, for editor) ─────────────────────────────
+// ── génération sans hasard ────────────────────────────────────────────────
 
-fn build_fields(width: usize, height: usize, bombs: &[bool]) -> Vec<Field> {
-    let mut data: Vec<Field> = bombs.iter().map(|&cat| Field { cat, ..Default::default() }).collect();
-    for y in 0..height {
-        for x in 0..width {
-            let mut count = 0u8;
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    if dx == 0 && dy == 0 { continue; }
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32
-                        && data[ny as usize * width + nx as usize].cat
-                    {
-                        count += 1;
-                    }
-                }
-            }
-            data[y * width + x].neighbours = count;
-        }
+/// Place `cats` chats parmi `candidates` (tirage sans remise) et calcule
+/// le nombre de voisins de chaque case.
+fn random_grid(
+    width: usize, height: usize, cats: usize,
+    candidates: &[usize], rng: &mut impl Rng,
+) -> Vec<Field> {
+    let mut data = vec![Field::default(); width * height];
+    for pick in rand::seq::index::sample(rng, candidates.len(), cats) {
+        let idx = candidates[pick];
+        data[idx].cat = true;
+        for_each_neighbour(width, height, idx, |n| data[n].neighbours += 1);
     }
     data
 }
 
-fn flood_fill_count(data: &[Field], width: usize, height: usize, sx: usize, sy: usize) -> usize {
-    let mut visited = vec![false; width * height];
-    let mut stack = vec![(sx, sy)];
-    let mut count = 0usize;
-    while let Some((x, y)) = stack.pop() {
-        let idx = y * width + x;
-        if visited[idx] || data[idx].cat { continue; }
-        visited[idx] = true;
-        count += 1;
-        if data[idx].neighbours == 0 {
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    if dx == 0 && dy == 0 { continue; }
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
-                        stack.push((nx as usize, ny as usize));
-                    }
-                }
-            }
-        }
-    }
-    count
-}
-
-/// Tests how many non-bomb starting positions allow the grid to be solved
-/// by pure logic (no guessing). Returns (solvable_count, total_starts).
-pub fn count_solvable_starts(width: usize, height: usize, bombs: &[bool]) -> (usize, usize) {
-    let data = build_fields(width, height, bombs);
-    let total_cats = bombs.iter().filter(|&&b| b).count();
-    let starts: Vec<(usize, usize)> = (0..height)
-        .flat_map(|y| (0..width).map(move |x| (x, y)))
-        .filter(|&(x, y)| !data[y * width + x].cat)
-        .collect();
-    let total = starts.len();
-    let solvable = starts.into_par_iter()
-        .filter(|&(sx, sy)| grid_is_solvable(&data, width, height, total_cats, sx, sy))
-        .count();
-    (solvable, total)
-}
-
-/// Finds the best automatic starting position for a custom grid:
-/// among solvable positions, picks the one that reveals the largest area.
-/// Falls back to the largest flood-fill area if no solvable start exists.
-/// Returns `None` only if the grid has no non-bomb cells at all.
-pub fn find_best_start(width: usize, height: usize, bombs: &[bool]) -> Option<(usize, usize)> {
-    let data = build_fields(width, height, bombs);
-    let total_cats = bombs.iter().filter(|&&b| b).count();
-
-    let starts: Vec<(usize, usize)> = (0..height)
-        .flat_map(|y| (0..width).map(move |x| (x, y)))
-        .filter(|&(x, y)| !data[y * width + x].cat)
-        .collect();
-
-    if starts.is_empty() { return None; }
-
-    // Best solvable start (largest flood-fill area among solvable positions)
-    let best_solvable = starts.par_iter().filter_map(|&(sx, sy)| {
-        if !grid_is_solvable(&data, width, height, total_cats, sx, sy) { return None; }
-        Some((flood_fill_count(&data, width, height, sx, sy), sx, sy))
-    }).max_by_key(|&(area, _, _)| area);
-
-    if let Some((_, x, y)) = best_solvable {
-        return Some((x, y));
-    }
-
-    // Fallback: no solvable start — pick the largest flood-fill area
-    starts.par_iter()
-        .map(|&(sx, sy)| (flood_fill_count(&data, width, height, sx, sy), sx, sy))
-        .max_by_key(|&(area, _, _)| area)
-        .map(|(_, x, y)| (x, y))
-}
-
-// ── public generation entry point ────────────────────────────────────────
-
-/// Generates a grid guaranteed to be solvable by pure logic.
-/// Candidates are tested in parallel via Rayon.
-/// `attempts` is incremented for each grid tested (caller may read it concurrently).
+/// Génère une grille garantie résoluble par logique pure depuis la case de
+/// départ, qui est toujours vide (elle et ses 8 voisines sont sans chat).
+/// Les candidates sont testées en parallèle via Rayon.
+///
+/// `attempts` est incrémenté à chaque grille testée (lisible en parallèle).
+/// Renvoie `None` si `cancel` passe à `true` avant qu'une grille soit trouvée.
 pub fn generate_grid_no_guess(
     width: usize, height: usize, total_cats: usize,
     start_x: usize, start_y: usize,
     attempts: &AtomicU32,
-) -> Vec<Field> {
+    cancel: &AtomicBool,
+) -> Option<Vec<Field>> {
     let size = width * height;
+    let start = start_y * width + start_x;
 
-    let safe: std::collections::HashSet<usize> = (-1i32..=1)
-        .flat_map(|dy| (-1i32..=1).map(move |dx| (dx, dy)))
-        .map(|(dx, dy)| (start_x as i32 + dx, start_y as i32 + dy))
-        .filter(|&(nx, ny)| nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32)
-        .map(|(nx, ny)| ny as usize * width + nx as usize)
-        .collect();
+    let mut is_safe = vec![false; size];
+    is_safe[start] = true;
+    for_each_neighbour(width, height, start, |n| is_safe[n] = true);
+    let candidates: Vec<usize> = (0..size).filter(|&i| !is_safe[i]).collect();
+    let cats = total_cats.min(candidates.len());
 
     let batch_size = (rayon::current_num_threads() * 4).max(16);
     let mut rng = StdRng::from_entropy();
 
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let seeds: Vec<u64> = (0..batch_size).map(|_| rng.gen()).collect();
 
         let result = seeds.into_par_iter().find_map_any(|seed| {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
             attempts.fetch_add(1, Ordering::Relaxed);
-
-            let mut data = vec![Field::default(); size];
-            let mut rng  = StdRng::seed_from_u64(seed);
-
-            let mut placed = 0;
-            while placed < total_cats {
-                let id = rng.gen_range(0..size);
-                if !data[id].cat && !safe.contains(&id) {
-                    data[id].cat = true;
-                    placed += 1;
-                }
-            }
-
-            for y in 0..height {
-                for x in 0..width {
-                    let mut count = 0u8;
-                    for dy in -1i32..=1 {
-                        for dx in -1i32..=1 {
-                            let nx = x as i32 + dx;
-                            let ny = y as i32 + dy;
-                            if nx >= 0 && nx < width as i32
-                                && ny >= 0 && ny < height as i32
-                                && data[ny as usize * width + nx as usize].cat
-                            {
-                                count += 1;
-                            }
-                        }
-                    }
-                    data[y * width + x].neighbours = count;
-                }
-            }
-
-            if grid_is_solvable(&data, width, height, total_cats, start_x, start_y) {
-                Some(data)
-            } else {
-                None
-            }
+            let mut rng = StdRng::seed_from_u64(seed);
+            let data = random_grid(width, height, cats, &candidates, &mut rng);
+            grid_is_solvable(&data, width, height, cats, start_x, start_y).then_some(data)
         });
 
-        if let Some(data) = result {
-            return data;
+        if result.is_some() {
+            return result;
         }
     }
-}
-
-// ── standalone solver (used in parallel tasks) ────────────────────────────
-
-fn grid_simulate_reveal(
-    data: &[Field], discovered: &mut Vec<bool>,
-    width: usize, height: usize,
-    start_x: usize, start_y: usize,
-) {
-    let mut stack = vec![(start_x, start_y)];
-    while let Some((x, y)) = stack.pop() {
-        let idx = y * width + x;
-        if discovered[idx] || data[idx].cat { continue; }
-        discovered[idx] = true;
-        if data[idx].neighbours == 0 {
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
-                    if dx == 0 && dy == 0 { continue; }
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
-                        stack.push((nx as usize, ny as usize));
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn neighbors_hidden(
-    x: usize, y: usize, width: usize, height: usize,
-    discovered: &[bool], flagged: &[bool],
-) -> (Vec<usize>, usize) {
-    let mut hidden = Vec::with_capacity(8);
-    let mut flag_count = 0usize;
-    for dy in -1i32..=1 {
-        for dx in -1i32..=1 {
-            if dx == 0 && dy == 0 { continue; }
-            let nx = x as i32 + dx; let ny = y as i32 + dy;
-            if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 { continue; }
-            let nidx = ny as usize * width + nx as usize;
-            if !discovered[nidx] {
-                if flagged[nidx] { flag_count += 1; } else { hidden.push(nidx); }
-            }
-        }
-    }
-    (hidden, flag_count)
 }
 
 fn grid_is_solvable(
     data: &[Field], width: usize, height: usize,
     total_cats: usize, start_x: usize, start_y: usize,
 ) -> bool {
-    let n = width * height;
-    let mut discovered = vec![false; n];
-    let mut flagged    = vec![false; n];
+    let mut solver =
+        Solver::with_state(data, width, height, total_cats, vec![false; width * height]);
+    solver.mark_safe(start_y * width + start_x);
+    solver.run();
+    solver.is_solved()
+}
 
-    grid_simulate_reveal(data, &mut discovered, width, height, start_x, start_y);
+// ── solveur logique ───────────────────────────────────────────────────────
 
-    loop {
-        let mut progress = false;
+/// « Parmi ces `len` cases cachées, exactement `remaining` sont des chats. »
+#[derive(Clone, Copy, Default)]
+struct Constraint {
+    cells: [u32; 8],
+    len: u8,
+    remaining: u8,
+}
 
-        // ── Phase 1 : contraintes locales (règles de base) ────────────────
-        for y in 0..height {
-            for x in 0..width {
-                let idx = y * width + x;
-                if !discovered[idx] || data[idx].cat { continue; }
-                let nb = data[idx].neighbours as usize;
-                if nb == 0 { continue; }
-                let (hidden, flag_count) =
-                    neighbors_hidden(x, y, width, height, &discovered, &flagged);
-
-                if flag_count + hidden.len() == nb && !hidden.is_empty() {
-                    for &nidx in &hidden { flagged[nidx] = true; progress = true; }
-                }
-                if flag_count == nb && !hidden.is_empty() {
-                    for &nidx in &hidden {
-                        if !discovered[nidx] {
-                            grid_simulate_reveal(data, &mut discovered, width, height,
-                                                 nidx % width, nidx / width);
-                            progress = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Phase 2 : combinaison généralisée de paires de contraintes ───────
-        // Pour toute paire ordonnée (A, B) avec ra ≥ rb :
-        //   mines(A−B) − mines(B−A) = ra − rb
-        // Si ra − rb == |A−B|  →  toutes les cases de A−B sont des bombes
-        //                         toutes les cases de B−A sont sûres.
-        // Cas particulier ra−rb=0, |A−B|=0 : A ⊆ B, révéler B−A.
-        // La direction symétrique (rb ≥ ra) est couverte quand i et j sont échangés.
-        {
-            let mut constraints: Vec<(Vec<usize>, usize)> = Vec::new();
-            for y in 0..height {
-                for x in 0..width {
-                    let idx = y * width + x;
-                    if !discovered[idx] || data[idx].cat { continue; }
-                    let nb = data[idx].neighbours as usize;
-                    if nb == 0 { continue; }
-                    let (hidden, flag_count) =
-                        neighbors_hidden(x, y, width, height, &discovered, &flagged);
-                    if hidden.is_empty() { continue; }
-                    if nb < flag_count { continue; }
-                    let remaining = nb - flag_count;
-                    constraints.push((hidden, remaining));
-                }
-            }
-
-            let nc = constraints.len();
-            for i in 0..nc {
-                let (ref ha, ra) = constraints[i];
-                for j in 0..nc {
-                    if i == j { continue; }
-                    let (ref hb, rb) = constraints[j];
-                    // On ne traite que ra ≥ rb ; le cas symétrique (rb > ra)
-                    // est traité quand i et j sont échangés dans la double boucle.
-                    if ra < rb { continue; }
-
-                    // diff_a = A − B,  diff_b = B − A
-                    let diff_a: Vec<usize> = ha.iter()
-                        .filter(|&&c| !hb.contains(&c)).copied().collect();
-                    let diff_b: Vec<usize> = hb.iter()
-                        .filter(|&&c| !ha.contains(&c)).copied().collect();
-                    if diff_a.is_empty() && diff_b.is_empty() { continue; }
-
-                    // Condition : ra − rb = |diff_a|  →  toutes diff_a sont bombes,
-                    //                                     toutes diff_b sont sûres.
-                    if ra - rb == diff_a.len() {
-                        for &nidx in &diff_a {
-                            if !flagged[nidx] && !discovered[nidx] {
-                                flagged[nidx] = true;
-                                progress = true;
-                            }
-                        }
-                        for &nidx in &diff_b {
-                            if !discovered[nidx] {
-                                grid_simulate_reveal(data, &mut discovered, width, height,
-                                                     nidx % width, nidx / width);
-                                progress = true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Phase 3 : contrainte globale ──────────────────────────────────
-        let flags_placed   = flagged.iter().filter(|&&f| f).count();
-        let remaining_cats = total_cats.saturating_sub(flags_placed);
-        let hidden_total: Vec<usize> =
-            (0..n).filter(|&i| !discovered[i] && !flagged[i]).collect();
-
-        if remaining_cats == hidden_total.len() && !hidden_total.is_empty() {
-            for i in hidden_total { flagged[i] = true; progress = true; }
-        } else if remaining_cats == 0 && !hidden_total.is_empty() {
-            for i in hidden_total {
-                grid_simulate_reveal(data, &mut discovered, width, height,
-                                     i % width, i / width);
-                progress = true;
-            }
-        }
-
-        if !progress { break; }
+impl Constraint {
+    fn cells(&self) -> &[u32] {
+        &self.cells[..self.len as usize]
     }
 
-    data.iter().zip(discovered.iter()).all(|(f, &d)| f.cat || d)
+    fn contains(&self, cell: u32) -> bool {
+        self.cells().contains(&cell)
+    }
+}
+
+/// Simule ce qu'un joueur peut déduire sans jamais deviner.
+///
+/// Règles appliquées jusqu'à ce que plus rien ne bouge :
+/// 1. un chiffre dont toutes les cases cachées sont des chats / sont sûres ;
+/// 2. deux chiffres proches A et B avec `ra ≥ rb` : comme
+///    `chats(A−B) − chats(B−A) = ra − rb`, si `ra − rb = |A−B|` alors
+///    toutes les cases de A−B sont des chats et celles de B−A sont sûres ;
+/// 3. le compte global de chats restants.
+struct Solver<'a> {
+    data: &'a [Field],
+    width: usize,
+    height: usize,
+    total_cats: usize,
+    discovered: Vec<bool>,
+    flagged: Vec<bool>,
+    n_discovered: usize,
+    n_flagged: usize,
+    constraints: Vec<Constraint>,
+    stack: Vec<usize>,
+    /// Mode « aide » : noter les cases prouvées sûres au lieu de les découvrir.
+    collect_safe: bool,
+    safe_found: Vec<usize>,
+    is_safe_found: Vec<bool>,
+}
+
+impl<'a> Solver<'a> {
+    fn with_state(
+        data: &'a [Field], width: usize, height: usize,
+        total_cats: usize, discovered: Vec<bool>,
+    ) -> Self {
+        let n = width * height;
+        let n_discovered = discovered.iter().filter(|&&d| d).count();
+        Self {
+            data, width, height, total_cats,
+            discovered,
+            flagged: vec![false; n],
+            n_discovered,
+            n_flagged: 0,
+            constraints: vec![Constraint::default(); n],
+            stack: Vec::new(),
+            collect_safe: false,
+            safe_found: Vec::new(),
+            is_safe_found: vec![false; n],
+        }
+    }
+
+    fn is_solved(&self) -> bool {
+        self.n_discovered + self.total_cats == self.width * self.height
+    }
+
+    /// Une case prouvée sûre : on la découvre (avec propagation des zéros).
+    /// Renvoie `true` si cela apporte quelque chose de nouveau.
+    fn mark_safe(&mut self, idx: usize) -> bool {
+        if self.discovered[idx] || self.data[idx].cat {
+            return false;
+        }
+        if self.collect_safe {
+            if self.is_safe_found[idx] {
+                return false;
+            }
+            self.is_safe_found[idx] = true;
+            self.safe_found.push(idx);
+            return true;
+        }
+        self.stack.push(idx);
+        while let Some(i) = self.stack.pop() {
+            if self.discovered[i] || self.data[i].cat {
+                continue;
+            }
+            self.discovered[i] = true;
+            self.n_discovered += 1;
+            if self.data[i].neighbours == 0 {
+                let stack = &mut self.stack;
+                for_each_neighbour(self.width, self.height, i, |n| stack.push(n));
+            }
+        }
+        true
+    }
+
+    /// Une case prouvée être un chat.
+    fn mark_cat(&mut self, idx: usize) -> bool {
+        if self.flagged[idx] || self.discovered[idx] {
+            return false;
+        }
+        self.flagged[idx] = true;
+        self.n_flagged += 1;
+        true
+    }
+
+    fn constraint_at(&self, idx: usize) -> Constraint {
+        let mut c = Constraint::default();
+        let f = &self.data[idx];
+        if !self.discovered[idx] || f.cat || f.neighbours == 0 {
+            return c;
+        }
+        let mut flags = 0u8;
+        for_each_neighbour(self.width, self.height, idx, |n| {
+            if self.discovered[n] {
+                return;
+            }
+            if self.flagged[n] {
+                flags += 1;
+            } else {
+                c.cells[c.len as usize] = n as u32;
+                c.len += 1;
+            }
+        });
+        c.remaining = f.neighbours.saturating_sub(flags);
+        c
+    }
+
+    fn run(&mut self) {
+        let n = self.width * self.height;
+        loop {
+            let mut progress = false;
+
+            // Photographie des contraintes. Elles restent vraies même si des
+            // cases sont résolues pendant le tour : les utiliser reste correct.
+            for idx in 0..n {
+                self.constraints[idx] = self.constraint_at(idx);
+            }
+
+            for idx in 0..n {
+                let a = self.constraints[idx];
+                if a.len == 0 {
+                    continue;
+                }
+
+                // Règle 1 : contrainte seule.
+                if a.remaining == a.len {
+                    for &c in a.cells() {
+                        progress |= self.mark_cat(c as usize);
+                    }
+                } else if a.remaining == 0 {
+                    for &c in a.cells() {
+                        progress |= self.mark_safe(c as usize);
+                    }
+                }
+
+                // Règle 2 : paires. Deux chiffres ne partagent des voisines
+                // que s'ils sont à 2 cases au plus l'un de l'autre.
+                let x = idx % self.width;
+                let y = idx / self.width;
+                let x0 = x.saturating_sub(2);
+                let x1 = (x + 2).min(self.width - 1);
+                let y0 = y.saturating_sub(2);
+                let y1 = (y + 2).min(self.height - 1);
+                for ny in y0..=y1 {
+                    for nx in x0..=x1 {
+                        let jdx = ny * self.width + nx;
+                        if jdx == idx {
+                            continue;
+                        }
+                        let b = self.constraints[jdx];
+                        if b.len == 0 || a.remaining < b.remaining {
+                            continue;
+                        }
+                        let only_a = a.cells().iter().filter(|&&c| !b.contains(c)).count();
+                        if only_a == a.len as usize {
+                            continue; // aucune case commune
+                        }
+                        if (a.remaining - b.remaining) as usize != only_a {
+                            continue;
+                        }
+                        for &c in a.cells() {
+                            if !b.contains(c) {
+                                progress |= self.mark_cat(c as usize);
+                            }
+                        }
+                        for &c in b.cells() {
+                            if !a.contains(c) {
+                                progress |= self.mark_safe(c as usize);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Règle 3 : compte global.
+            let hidden = n - self.n_discovered - self.n_flagged - self.safe_found.len();
+            let remaining = self.total_cats.saturating_sub(self.n_flagged);
+            if hidden > 0 && (remaining == hidden || remaining == 0) {
+                for idx in 0..n {
+                    if self.discovered[idx] || self.flagged[idx] || self.is_safe_found[idx] {
+                        continue;
+                    }
+                    progress |= if remaining == 0 {
+                        self.mark_safe(idx)
+                    } else {
+                        self.mark_cat(idx)
+                    };
+                }
+            }
+
+            if !progress {
+                return;
+            }
+        }
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ancien solveur (toutes les paires, O(n²)), gardé comme référence :
+    /// le nouveau doit accepter exactement les mêmes grilles.
+    fn reference_is_solvable(
+        data: &[Field], width: usize, height: usize,
+        total_cats: usize, start_x: usize, start_y: usize,
+    ) -> bool {
+        fn reveal(data: &[Field], discovered: &mut [bool], width: usize, height: usize, start: usize) {
+            let mut stack = vec![start];
+            while let Some(idx) = stack.pop() {
+                if discovered[idx] || data[idx].cat {
+                    continue;
+                }
+                discovered[idx] = true;
+                if data[idx].neighbours == 0 {
+                    for_each_neighbour(width, height, idx, |n| stack.push(n));
+                }
+            }
+        }
+        fn hidden_around(
+            idx: usize, width: usize, height: usize, discovered: &[bool], flagged: &[bool],
+        ) -> (Vec<usize>, usize) {
+            let mut hidden = Vec::new();
+            let mut flags = 0;
+            for_each_neighbour(width, height, idx, |n| {
+                if !discovered[n] {
+                    if flagged[n] { flags += 1 } else { hidden.push(n) }
+                }
+            });
+            (hidden, flags)
+        }
+
+        let n = width * height;
+        let mut discovered = vec![false; n];
+        let mut flagged = vec![false; n];
+        reveal(data, &mut discovered, width, height, start_y * width + start_x);
+
+        loop {
+            let mut progress = false;
+
+            for idx in 0..n {
+                if !discovered[idx] || data[idx].cat || data[idx].neighbours == 0 {
+                    continue;
+                }
+                let nb = data[idx].neighbours as usize;
+                let (hidden, flags) = hidden_around(idx, width, height, &discovered, &flagged);
+                if hidden.is_empty() {
+                    continue;
+                }
+                if flags + hidden.len() == nb {
+                    for &h in &hidden { flagged[h] = true; progress = true; }
+                }
+                if flags == nb {
+                    for &h in &hidden { reveal(data, &mut discovered, width, height, h); progress = true; }
+                }
+            }
+
+            let mut constraints: Vec<(Vec<usize>, usize)> = Vec::new();
+            for idx in 0..n {
+                if !discovered[idx] || data[idx].cat || data[idx].neighbours == 0 {
+                    continue;
+                }
+                let nb = data[idx].neighbours as usize;
+                let (hidden, flags) = hidden_around(idx, width, height, &discovered, &flagged);
+                if hidden.is_empty() || nb < flags {
+                    continue;
+                }
+                constraints.push((hidden, nb - flags));
+            }
+            for i in 0..constraints.len() {
+                for j in 0..constraints.len() {
+                    if i == j { continue; }
+                    let (ha, ra) = &constraints[i];
+                    let (hb, rb) = &constraints[j];
+                    if ra < rb { continue; }
+                    let diff_a: Vec<usize> = ha.iter().filter(|c| !hb.contains(c)).copied().collect();
+                    let diff_b: Vec<usize> = hb.iter().filter(|c| !ha.contains(c)).copied().collect();
+                    if diff_a.is_empty() && diff_b.is_empty() { continue; }
+                    if ra - rb == diff_a.len() {
+                        for &c in &diff_a {
+                            if !flagged[c] && !discovered[c] { flagged[c] = true; progress = true; }
+                        }
+                        for &c in &diff_b {
+                            if !discovered[c] {
+                                reveal(data, &mut discovered, width, height, c);
+                                progress = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let flags_placed = flagged.iter().filter(|&&f| f).count();
+            let remaining = total_cats.saturating_sub(flags_placed);
+            let hidden: Vec<usize> = (0..n).filter(|&i| !discovered[i] && !flagged[i]).collect();
+            if !hidden.is_empty() {
+                if remaining == hidden.len() {
+                    for i in hidden { flagged[i] = true; progress = true; }
+                } else if remaining == 0 {
+                    for i in hidden { reveal(data, &mut discovered, width, height, i); progress = true; }
+                }
+            }
+
+            if !progress { break; }
+        }
+
+        data.iter().zip(discovered.iter()).all(|(f, &d)| f.cat || d)
+    }
+
+    fn candidates_for(width: usize, height: usize, start: usize) -> Vec<usize> {
+        let mut is_safe = vec![false; width * height];
+        is_safe[start] = true;
+        for_each_neighbour(width, height, start, |n| is_safe[n] = true);
+        (0..width * height).filter(|&i| !is_safe[i]).collect()
+    }
+
+    fn generate(width: usize, height: usize, cats: usize, sx: usize, sy: usize) -> Vec<Field> {
+        let attempts = AtomicU32::new(0);
+        let cancel = AtomicBool::new(false);
+        generate_grid_no_guess(width, height, cats, sx, sy, &attempts, &cancel).unwrap()
+    }
+
+    #[test]
+    fn solver_matches_reference() {
+        let mut rng = StdRng::seed_from_u64(1911);
+        let mut solvable = 0;
+        let mut total = 0;
+        for &(w, h, cats) in &[
+            (8, 8, 8), (9, 9, 10), (15, 10, 15), (15, 10, 25),
+            (16, 16, 40), (20, 15, 45), (27, 20, 120), (30, 16, 99),
+        ] {
+            for _ in 0..400 {
+                let sx = rng.gen_range(0..w);
+                let sy = rng.gen_range(0..h);
+                let cand = candidates_for(w, h, sy * w + sx);
+                let data = random_grid(w, h, cats, &cand, &mut rng);
+                let expected = reference_is_solvable(&data, w, h, cats, sx, sy);
+                let got = grid_is_solvable(&data, w, h, cats, sx, sy);
+                assert_eq!(got, expected, "désaccord sur une grille {w}x{h}, {cats} chats, départ ({sx},{sy})");
+                solvable += expected as usize;
+                total += 1;
+            }
+        }
+        // Le test n'a de valeur que si les deux issues sont bien représentées.
+        assert!(solvable > total / 20 && solvable < total * 19 / 20, "{solvable}/{total}");
+    }
+
+    #[test]
+    fn random_grid_counts_neighbours() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let (w, h) = (12, 9);
+        let cand: Vec<usize> = (0..w * h).collect();
+        let data = random_grid(w, h, 30, &cand, &mut rng);
+        assert_eq!(data.iter().filter(|f| f.cat).count(), 30);
+        for idx in 0..w * h {
+            let mut expected = 0;
+            for_each_neighbour(w, h, idx, |n| expected += data[n].cat as u8);
+            assert_eq!(data[idx].neighbours, expected);
+        }
+    }
+
+    #[test]
+    fn generated_grid_is_valid() {
+        let (w, h, cats) = (20, 15, 60);
+        for &(sx, sy) in &[(0, 0), (10, 7), (19, 14), (0, 7)] {
+            let data = generate(w, h, cats, sx, sy);
+            assert_eq!(data.iter().filter(|f| f.cat).count(), cats);
+            let start = sy * w + sx;
+            assert!(!data[start].cat);
+            assert_eq!(data[start].neighbours, 0);
+            assert!(reference_is_solvable(&data, w, h, cats, sx, sy));
+        }
+    }
+
+    #[test]
+    fn generation_can_be_cancelled() {
+        let attempts = AtomicU32::new(0);
+        let cancel = AtomicBool::new(true);
+        assert!(generate_grid_no_guess(40, 25, 250, 5, 5, &attempts, &cancel).is_none());
+    }
+
+    #[test]
+    fn too_many_cats_does_not_hang() {
+        // 3x3 : toutes les cases sont dans la zone sûre du centre.
+        let data = generate(3, 3, 5, 1, 1);
+        assert_eq!(data.iter().filter(|f| f.cat).count(), 0);
+    }
+
+    #[test]
+    fn marks_survive_generation_and_block_reveal() {
+        let (w, h, cats) = (15, 10, 15);
+        let mut model = Model::new();
+        model.reset(w, h, cats);
+        model.toggle_mark(1, 1); // drapeau, dans la zone sûre du clic en (0,0)
+        assert_eq!(model.cats_left(), cats as i32 - 1);
+        model.install(generate(w, h, cats, 0, 0));
+        model.reveal(0, 0);
+        assert_eq!(model.field(1, 1).flag, FLAG_SET);
+        assert!(!model.field(1, 1).discovered);
+        assert!(model.field(0, 0).discovered);
+        assert_eq!(model.cats_left(), cats as i32 - 1);
+        // drapeau → ? → rien
+        model.toggle_mark(1, 1);
+        assert_eq!(model.cats_left(), cats as i32);
+        model.toggle_mark(1, 1);
+        assert_eq!(model.field(1, 1).flag, FLAG_NONE);
+    }
+
+    #[test]
+    fn revealing_a_cat_loses() {
+        let (w, h, cats) = (15, 10, 15);
+        let mut model = Model::new();
+        model.reset(w, h, cats);
+        model.install(generate(w, h, cats, 7, 5));
+        model.reveal(7, 5);
+        assert!(model.exploded().is_none());
+        let cat = model.data.iter().position(|f| f.cat).unwrap();
+        model.reveal(cat % w, cat / w);
+        assert_eq!(model.exploded(), Some((cat % w, cat / w)));
+        assert!(!model.is_won());
+    }
+
+    #[test]
+    fn following_hints_wins_without_guessing() {
+        for &(w, h, cats) in &[(15, 10, 15), (27, 20, 120)] {
+            let mut model = Model::new();
+            model.reset(w, h, cats);
+            model.install(generate(w, h, cats, w / 2, h / 2));
+            model.reveal(w / 2, h / 2);
+            let mut steps = 0;
+            while !model.is_won() {
+                let (x, y) = model.deducible_safe().expect("une case doit toujours être déductible");
+                assert!(!model.field(x, y).cat && !model.field(x, y).discovered);
+                model.reveal(x, y);
+                steps += 1;
+                assert!(steps <= w * h);
+            }
+            assert!(model.exploded().is_none());
+            assert!(model.hint().is_none());
+            model.flag_remaining_cats();
+            assert_eq!(model.cats_left(), 0);
+        }
+    }
+
+    #[test]
+    fn hint_prefers_unmarked_cells() {
+        let (w, h, cats) = (20, 15, 25);
+        let mut model = Model::new();
+        model.reset(w, h, cats);
+        model.install(generate(w, h, cats, 10, 7));
+        model.reveal(10, 7);
+        // Le joueur pose un drapeau (faux) sur chaque case que l'aide propose :
+        // elle doit en proposer une autre tant qu'il en reste une non marquée.
+        let mut marked = 0;
+        while let Some((x, y)) = model.deducible_safe() {
+            if model.field(x, y).flag != FLAG_NONE {
+                break;
+            }
+            model.toggle_mark(x, y);
+            marked += 1;
+            assert!(marked <= w * h);
+        }
+        assert!(marked >= 1);
+        let (x, y) = model.deducible_safe().expect("il reste des cases sûres marquées à tort");
+        assert_eq!(model.field(x, y).flag, FLAG_SET);
+        assert!(!model.field(x, y).cat);
+    }
+
+    #[test]
+    fn chord_needs_matching_flags() {
+        // Grille 3x3 avec un seul chat dans le coin (0,0).
+        let (w, h) = (3, 3);
+        let cand = vec![0];
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut model = Model::new();
+        model.reset(w, h, 1);
+        model.install(random_grid(w, h, 1, &cand, &mut rng));
+        model.reveal(1, 1); // un « 1 »
+        assert_eq!(model.field(1, 1).neighbours, 1);
+        assert!(!model.chord(1, 1), "pas de drapeau : rien ne doit se passer");
+        model.toggle_mark(0, 0);
+        assert!(model.chord(1, 1));
+        assert!(model.is_won());
+    }
 }

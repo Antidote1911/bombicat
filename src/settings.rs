@@ -6,6 +6,9 @@ pub struct Preferences {
     pub level: usize,
 }
 
+/// Nombre de niveaux de difficulté.
+pub const LEVEL_COUNT: usize = 6;
+
 impl Default for Preferences {
     fn default() -> Self {
         Self { level: 1 }

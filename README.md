@@ -16,14 +16,18 @@ A minesweeper with cats, written in Rust with [egui](https://github.com/emilk/eg
 - **6 difficulty levels** — from Beginner to Chuck Norris
 - **No-guess generation** — every grid is guaranteed solvable by pure logic, no guessing required
 - **High scores** — top 10 times per level, stored locally in SQLite
+- **Hint** — `Ctrl+H` points at a cell that can actually be deduced (the game then no longer counts for high scores)
+- **Resizable window** — cell size follows the window size
 - **Dark UI** — fully vector-rendered via egui
 
 ## Controls
 
 | Action | Input |
 |---|---|
-| Reveal a cell | Left click |
+| Reveal a cell | Left click (on release, on the cell under the pointer) |
 | Place / remove a flag / `?` | Right click (cycles: none → flag → `?`) |
+| Reveal the neighbours of a number whose flags are placed | Left click on the number, middle click, or left + right |
+| Hint | `Ctrl+H` |
 | New game | Smiley button or `Ctrl+N` |
 
 ## Levels
@@ -33,9 +37,9 @@ A minesweeper with cats, written in Rust with [egui](https://github.com/emilk/eg
 | Beginner | 15 × 10 | 15 |
 | Normal | 20 × 15 | 25 |
 | Hard | 25 × 15 | 35 |
-| Very Hard | 27 × 20 | 110 |
-| Giant | 35 × 22 | 160 |
-| Chuck Norris | 40 × 25 | 215 |
+| Very Hard | 27 × 20 | 120 |
+| Giant | 35 × 22 | 190 |
+| Chuck Norris | 40 × 25 | 250 |
 
 ## Building and running
 
@@ -47,10 +51,16 @@ cargo run --release
 
 ### Cheat mode
 
-The `--cheat` flag enables middle-click to reveal the entire grid at once:
+The `--cheat` flag turns middle-click into "reveal the entire grid" (the game then no longer counts for high scores):
 
 ```bash
 cargo run --release -- --cheat
+```
+
+### Tests
+
+```bash
+cargo test --release
 ```
 
 ## No-guess algorithm
@@ -59,9 +69,10 @@ On each new game, the first click triggers grid generation in a background threa
 
 - **Local constraint**: if the number of hidden cells around a number equals its remaining cat count → all of them are cats (auto-flagged)
 - **Local constraint**: if all neighbouring cats are already flagged → remaining hidden neighbours are safe (auto-revealed)
+- **Constraint pairs**: for two nearby numbers A and B, if the difference of their remaining cats equals the number of cells only A touches → those cells are cats and the cells only B touches are safe
 - **Global constraint**: if total remaining cats equals total hidden cells → all are cats; if zero cats remain → all are safe
 
-The clicked cell and its 8 neighbours are always guaranteed cat-free. If the solver can reveal the entire grid without ever guessing, the layout is accepted. Otherwise a new placement is generated and the process repeats. In practice, current levels converge in under 10 attempts.
+The clicked cell and its 8 neighbours are always guaranteed cat-free. If the solver can reveal the entire grid without ever guessing, the layout is accepted. Otherwise a new placement is generated and the process repeats. The first four levels converge within a few dozen attempts; Giant and Chuck Norris need a few thousand, well under a second on a recent machine. Starting a new game cancels a generation in progress.
 
 ## Project structure
 

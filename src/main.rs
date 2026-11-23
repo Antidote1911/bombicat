@@ -1,5 +1,4 @@
 mod app;
-mod editor;
 mod model;
 mod scores;
 mod settings;
@@ -10,7 +9,7 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Bombicat")
-            .with_resizable(false),
+            .with_min_inner_size([320.0, 280.0]),
         ..Default::default()
     };
 

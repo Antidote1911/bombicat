@@ -16,14 +16,18 @@ Un démineur avec des chats, écrit en Rust avec [egui](https://github.com/emilk
 - **6 niveaux de difficulté** — de Débutant à Chuck Norris
 - **Génération sans hasard (no-guess)** — chaque grille est garantie résolvable par déduction pure, sans jamais avoir à deviner
 - **Meilleurs scores** — classement des 10 meilleurs temps par niveau, stocké localement en SQLite
+- **Aide** — `Ctrl+H` désigne une case qu'on peut réellement déduire (la partie ne compte alors plus pour les scores)
+- **Fenêtre redimensionnable** — la taille des cases suit celle de la fenêtre
 - **Interface sombre** — rendu entièrement vectoriel via egui
 
 ## Contrôles
 
 | Action | Commande |
 |---|---|
-| Découvrir une case | Clic gauche |
+| Découvrir une case | Clic gauche (au relâchement, sur la case sous la souris) |
 | Poser / retirer un drapeau / `?` | Clic droit (cycle : aucun → drapeau → `?`) |
+| Découvrir les voisines d'un chiffre dont les drapeaux sont posés | Clic gauche sur le chiffre, clic milieu, ou gauche + droit |
+| Aide | `Ctrl+H` |
 | Nouvelle partie | Bouton smiley ou `Ctrl+N` |
 
 ## Niveaux
@@ -33,9 +37,9 @@ Un démineur avec des chats, écrit en Rust avec [egui](https://github.com/emilk
 | Débutant | 15 × 10 | 15 |
 | Normal | 20 × 15 | 25 |
 | Difficile | 25 × 15 | 35 |
-| Ultra Difficile | 27 × 20 | 110 |
-| Géant | 35 × 22 | 160 |
-| Chuck Norris | 40 × 25 | 215 |
+| Ultra Difficile | 27 × 20 | 120 |
+| Géant | 35 × 22 | 190 |
+| Chuck Norris | 40 × 25 | 250 |
 
 ## Compilation et lancement
 
@@ -47,10 +51,16 @@ cargo run --release
 
 ### Mode triche
 
-Le flag `--cheat` active le clic milieu qui révèle toute la grille d'un coup :
+Le flag `--cheat` fait du clic milieu une révélation de toute la grille (la partie ne compte plus pour les scores) :
 
 ```bash
 cargo run --release -- --cheat
+```
+
+### Tests
+
+```bash
+cargo test --release
 ```
 
 ## Algorithme no-guess
@@ -59,9 +69,10 @@ cargo run --release -- --cheat
 
 - **Contrainte locale** : si le nombre de cases cachées autour d'un chiffre est égal au nombre de chats restants à trouver → toutes sont des chats (flaggage automatique)
 - **Contrainte locale** : si tous les chats voisins sont déjà flaggés → les cases cachées restantes sont sûres (révélation automatique)
+- **Paires de contraintes** : pour deux chiffres proches A et B, si la différence de leurs chats restants égale le nombre de cases propres à A → ces cases sont des chats et les cases propres à B sont sûres
 - **Contrainte globale** : si le total de chats restants égale le total de cases cachées → toutes sont des chats ; si zéro chat restant → toutes sont sûres
 
-La case cliquée et ses 8 voisines sont toujours garanties sans chat. Si le solveur arrive à révéler toute la grille sans jamais devoir deviner, la disposition est acceptée. Sinon, un nouveau placement est généré et le processus recommence. En pratique, les niveaux courants convergent en moins de 10 essais.
+La case cliquée et ses 8 voisines sont toujours garanties sans chat. Si le solveur arrive à révéler toute la grille sans jamais devoir deviner, la disposition est acceptée. Sinon, un nouveau placement est généré et le processus recommence. Les quatre premiers niveaux convergent en quelques dizaines d'essais ; Géant et Chuck Norris en demandent quelques milliers, soit bien moins d'une seconde sur une machine récente. Lancer une nouvelle partie annule la génération en cours.
 
 ## Structure du projet
 
