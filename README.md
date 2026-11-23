@@ -76,7 +76,7 @@ On each new game, the first click triggers grid generation in a background threa
 - **Constraint pairs**: for two nearby numbers A and B, if the difference of their remaining cats equals the number of cells only A touches → those cells are cats and the cells only B touches are safe
 - **Global constraint**: if total remaining cats equals total hidden cells → all are cats; if zero cats remain → all are safe
 
-The clicked cell and its 8 neighbours are always guaranteed cat-free. If the solver can reveal the entire grid without ever guessing, the layout is accepted. Otherwise the generator does not throw the grid away: it reshuffles the cats of a small square around the place where the solver got stuck, and keeps the change if the solver gets at least as far. A Chuck Norris grid thus takes about thirty attempts (around 12 ms on a single core) instead of about 10,000. Starting a new game cancels a generation in progress.
+The clicked cell and its 8 neighbours are always guaranteed cat-free. If the solver can reveal the entire grid without ever guessing, the layout is accepted. Otherwise the generator does not throw the grid away: it reshuffles the cats of a small square around the place where the solver got stuck, and keeps the change if the solver gets at least as far. After a few unsuccessful changes it starts again from a fresh grid, so that grids stay close to a random draw. A Chuck Norris grid thus takes about 150 attempts (45 ms on a single core) instead of about 10,000. Starting a new game cancels a generation in progress.
 
 With the "advanced deductions" option, the solver additionally works through every possible placement on each area of the frontier when the rules above are not enough.
 

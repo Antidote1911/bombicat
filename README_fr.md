@@ -76,7 +76,7 @@ cargo test --release
 - **Paires de contraintes** : pour deux chiffres proches A et B, si la différence de leurs chats restants égale le nombre de cases propres à A → ces cases sont des chats et les cases propres à B sont sûres
 - **Contrainte globale** : si le total de chats restants égale le total de cases cachées → toutes sont des chats ; si zéro chat restant → toutes sont sûres
 
-La case cliquée et ses 8 voisines sont toujours garanties sans chat. Si le solveur arrive à révéler toute la grille sans jamais devoir deviner, la disposition est acceptée. Sinon, le générateur ne jette pas la grille : il redistribue au hasard les chats d'un petit carré autour du point de blocage, et garde la retouche si le solveur va au moins aussi loin. Une grille Chuck Norris demande ainsi une trentaine d'essais (environ 12 ms sur un seul cœur) au lieu d'environ 10 000. Lancer une nouvelle partie annule la génération en cours.
+La case cliquée et ses 8 voisines sont toujours garanties sans chat. Si le solveur arrive à révéler toute la grille sans jamais devoir deviner, la disposition est acceptée. Sinon, le générateur ne jette pas la grille : il redistribue au hasard les chats d'un petit carré autour du point de blocage, et garde la retouche si le solveur va au moins aussi loin. Après quelques retouches infructueuses, il repart d'une grille neuve, pour que les grilles restent proches d'un tirage au hasard. Une grille Chuck Norris demande ainsi environ 150 essais (45 ms sur un seul cœur) au lieu d'environ 10 000. Lancer une nouvelle partie annule la génération en cours.
 
 Avec l'option « déductions avancées », le solveur étudie en plus tous les placements possibles sur chaque zone de la frontière quand les règles ci-dessus ne suffisent pas.
 

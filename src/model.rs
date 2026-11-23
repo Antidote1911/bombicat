@@ -312,8 +312,14 @@ fn grid_is_solvable(
     solve(data, width, height, total_cats, start_y * width + start_x, logic).solved
 }
 
-/// Nombre de retouches tentées sur une grille avant de repartir de zéro.
-const MAX_REPAIRS: usize = 2000;
+/// Nombre de retouches tentées sur une grille avant de repartir de zéro :
+/// une par tranche de 100 cases. Plus on retouche, plus c'est rapide, mais
+/// plus les grilles s'écartent d'un tirage au hasard (elles deviennent plus
+/// « aérées ») ; cette limite garde l'écart autour de 2 %.
+fn max_repairs(cells: usize) -> usize {
+    (cells / 100).max(1)
+}
+
 /// Demi-côté du carré de cases redistribuées à chaque retouche.
 const REPAIR_RADIUS: usize = 2;
 
@@ -339,7 +345,7 @@ fn try_generate(
 
     let mut stuck: Vec<usize> = Vec::new();
     let mut zone: Vec<usize> = Vec::new();
-    for _ in 0..MAX_REPAIRS {
+    for _ in 0..max_repairs(n) {
         if outcome.solved {
             return Some(data);
         }

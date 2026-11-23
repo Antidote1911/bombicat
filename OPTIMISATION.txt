@@ -10,14 +10,14 @@ et la version actuelle, pourquoi, et ce que ça donne en chiffres.
 
 Le solveur fait le même raisonnement qu'avant, environ 3 fois plus vite.
 Le générateur ne jette plus une grille au premier blocage : il la retouche
-localement, ce qui divise le nombre d'essais par 300 au niveau Chuck Norris.
+localement, ce qui divise le nombre d'essais par 60 au niveau Chuck Norris.
 
 Temps moyen pour générer une grille Chuck Norris (40×25, 250 chats),
 sur UN seul cœur :
 
     version 1.1.0 ...................... 3 587 ms
     solveur optimisé ................... 1 684 ms
-    solveur optimisé + retouches .......    12 ms
+    solveur optimisé + retouches .......    45 ms
 
 
 1. RAPPEL : COMMENT MARCHE LA GÉNÉRATION « SANS HASARD »
@@ -149,7 +149,10 @@ J'ai attaqué les deux.
       3. relancer le solveur sur la grille retouchée, depuis le début ;
       4. garder la retouche si le solveur découvre au moins autant de cases
          qu'avant, sinon l'annuler ;
-      5. recommencer en 2 jusqu'à ce que la grille soit résolue.
+      5. recommencer en 2 jusqu'à ce que la grille soit résolue ;
+      6. si la grille n'est toujours pas résolue après quelques retouches
+         (une par tranche de 100 cases : 10 pour Chuck Norris), repartir
+         d'une grille neuve. Cette limite est expliquée au § 3.5.
 
     Le solveur repart de zéro à chaque retouche : c'est lui, et lui seul, qui
     déclare la grille bonne. La garantie « sans hasard » est donc exactement
@@ -164,57 +167,67 @@ J'ai attaqué les deux.
     Nombre moyen de grilles essayées avant d'en trouver une bonne :
 
                               v1.1.0    optimisé + retouches    gain
-    Ultra Difficile 27×20         38              10             ×4
-    Géant           35×22      2 388              26            ×90
-    Chuck Norris    40×25      9 514              31           ×300
+    Ultra Difficile 27×20         38              13             ×3
+    Géant           35×22      2 388             115            ×20
+    Chuck Norris    40×25      9 514             157            ×60
 
     Temps moyen (et pire cas observé) pour générer une grille, sur UN cœur :
 
                               v1.1.0             solveur seul       + retouches
-    Ultra Difficile 27×20     9,3 ms (51 ms)     3,8 ms (11 ms)     1,2 ms (12 ms)
-    Géant           35×22     646 ms (2,3 s)     160 ms (0,6 s)     6,4 ms (45 ms)
-    Chuck Norris    40×25     3 587 ms (16 s)    1 684 ms (7,4 s)   11,9 ms (54 ms)
+    Ultra Difficile 27×20     9,3 ms (51 ms)     3,8 ms (11 ms)     1,6 ms (12 ms)
+    Géant           35×22     646 ms (2,3 s)     160 ms (0,6 s)     21 ms (0,18 s)
+    Chuck Norris    40×25     3 587 ms (16 s)    1 684 ms (7,4 s)   45 ms (0,29 s)
 
     Sur les 32 threads de la machine de mesure, la version 1.1.0 mettait
     311 ms en moyenne (jusqu'à 966 ms) pour une grille Chuck Norris.
-    La version actuelle met 12 ms avec un seul thread.
+    La version actuelle met 45 ms avec un seul thread.
 
 3.4 Conséquence : Rayon a été supprimé
 
-    Avec une trentaine d'essais par grille, le parallélisme ne sert plus à
-    rien — pire, il ralentissait (le temps de réveiller 32 threads dépasse
-    le temps de calcul). La dépendance Rayon a été retirée : le jeu génère
-    sur un seul thread d'arrière-plan, et tourne aussi bien sur une vieille
-    machine à 2 cœurs que sur une station de travail.
+    Avec une centaine d'essais par grille au lieu de dix mille, le
+    parallélisme ne sert plus à grand-chose. La dépendance Rayon a été
+    retirée : le jeu génère sur un seul thread d'arrière-plan, et tourne
+    aussi bien sur une vieille machine à 2 cœurs que sur une station de
+    travail.
 
     La génération peut aussi être annulée (nouvelle partie pendant le
     calcul) : avant, le thread continuait jusqu'à trouver une grille.
 
-3.5 Ce que ça coûte : un léger biais, mesuré
+3.5 Ce que ça coûte : un biais, mesuré puis réduit
 
     Retoucher jusqu'à ce que ça marche n'est pas tout à fait la même chose
     que tirer au hasard parmi toutes les grilles résolubles : les retouches
-    favorisent un peu les dispositions faciles à résoudre. Je l'ai mesuré en
-    comparant les grilles produites par les deux méthodes :
+    favorisent un peu les dispositions faciles à résoudre, où les chats sont
+    regroupés et les zones vides plus grandes. Je l'ai mesuré en comptant
+    les cases vides (zéro chat voisin) par grille, comparées à l'ancien
+    tirage par rejet qui sert de référence.
 
-    Chuck Norris (40×25, 250 chats)        ancien tirage    retouches
-      cases vides (zéro voisin) par grille      86,0           92,0     (+7 %)
-      chats voisins par chat (regroupement)     1,871          1,935    (+3 %)
-      part des chats sur le bord                13,3 %         13,5 %
+    Trois réglages ont été essayés, au niveau Chuck Norris (référence :
+    86,4 cases vides par grille) :
 
-    Ultra Difficile (27×20, 120 chats)
-      cases vides par grille                    65,6           69,5     (+6 %)
-      chats voisins par chat                    1,626          1,678    (+3 %)
-      part des chats sur le bord                17,5 %         17,5 %
+      réglage                                   cases vides   écart    temps
+      retouche de toute la zone indécise           105,5       +22 %    13 ms
+      retouche d'un carré 5×5, sans limite          92,4        +7 %    11 ms
+      carré 5×5, 10 retouches max (retenu)          88,2        +2 %    45 ms
 
-    Les grilles sont donc très légèrement plus « aérées » qu'avant.
+    Plus on s'autorise de retouches sur une même grille, plus elle s'écarte
+    d'un tirage au hasard. D'où la limite d'une retouche par tranche de 100
+    cases : au-delà, on repart d'une grille neuve. On y perd un facteur 4 en
+    vitesse (45 ms au lieu de 11), mais la difficulté des grilles reste
+    pratiquement celle d'avant.
 
-    Ma première version des retouches redistribuait TOUTE la zone indécise
-    d'un coup. Elle était aussi rapide, mais le biais était net : +23 % de
-    cases vides et +14 % de regroupement au niveau Chuck Norris, donc des
-    grilles sensiblement plus faciles. C'est pour cela que la retouche est
-    limitée à un carré 5×5 : le biais tombe à +7 % / +3 %, sans perte de
-    vitesse. Un carré 3×3 ne fait pas mieux (mêmes chiffres).
+    Écart final par niveau (cases vides par grille, ancien tirage → retouches) :
+
+      Difficile       25×15, 62 chats     83,9 → 84,9    +1,2 %
+      Ultra Difficile 27×20, 120 chats    66,4 → 67,3    +1,4 %
+      Géant           35×22, 190 chats    70,9 → 72,2    +1,8 %
+      Chuck Norris    40×25, 250 chats    86,4 → 88,2    +2,1 %
+
+    Le regroupement des chats (nombre moyen de chats voisins d'un chat) suit
+    la même tendance : 1,881 → 1,899 au niveau Chuck Norris, soit +1 %.
+    La part des chats sur le bord ne bouge pas (13,2 % → 13,3 %).
+
+    Un carré 3×3 au lieu de 5×5 ne change rien à ces chiffres.
 
 
 4. LE SOLVEUR « AVANCÉ » (OPTION, DÉSACTIVÉE PAR DÉFAUT)
@@ -244,8 +257,8 @@ Quand les règles simples bloquent, le solveur avancé :
 Une zone trop grosse (plus de 20 000 branches explorées) est abandonnée : le
 solveur ne conclut alors rien dessus, ce qui reste toujours correct.
 
-Ce solveur n'accélère presque pas la génération (29 essais au lieu de 31 pour
-Chuck Norris) : les retouches suffisent. Son intérêt est ailleurs — il
+Ce solveur accélère peu la génération (113 essais au lieu de 157 pour
+Chuck Norris) : les retouches font l'essentiel. Son intérêt est ailleurs — il
 accepte des grilles qui demandent au joueur un raisonnement plus poussé. C'est
 pourquoi c'est une option, et pourquoi les scores obtenus avec sont classés à
 part. L'aide (Ctrl+H) utilise le même niveau de raisonnement que la grille.
@@ -276,11 +289,12 @@ suivant que l'aide : elles se gagnent toutes sans jamais deviner.
     optimisée (--release).
   - « Un cœur » : RAYON_NUM_THREADS=1 pour les anciennes versions ; la
     version actuelle n'utilise de toute façon qu'un thread.
-  - Chaque ligne : 40 grilles pour les anciennes versions, 400 pour la
+  - Chaque ligne : 40 grilles pour les anciennes versions, 1 000 pour la
     version actuelle, en alternant un premier clic au centre et dans un coin.
   - Les temps varient d'une exécution à l'autre (surtout les pires cas) :
     retenir les ordres de grandeur, pas la décimale.
-  - Statistiques de biais : 400 grilles (27×20) et 100 grilles (40×25) par
-    méthode, premier clic au centre.
+  - Statistiques de biais : 600 à 3 000 grilles par méthode et par niveau,
+    premier clic au centre ; l'incertitude sur le nombre moyen de cases
+    vides est de ±0,2 à ±0,5.
 
 Pour relancer les tests :   cargo test
