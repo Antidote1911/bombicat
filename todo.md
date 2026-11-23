@@ -40,7 +40,7 @@ Issu de la comparaison avec KMines (novembre 2026).
 
 ## Deuxième passe
 
-- [x] Génération par retouches locales au lieu du rejet complet (Chuck Norris : ~31 essais au lieu de ~9 500, 12 ms sur un cœur)
+- [x] Génération par retouches locales au lieu du rejet complet (Chuck Norris : ~157 essais au lieu de ~9 500, 45 ms sur un cœur)
 - [x] Rayon supprimé (devenu inutile)
 - [x] Solveur avancé (étude de tous les cas par zone), en option dans les préférences
 - [x] Progression des niveaux : Normal 25 → 40 chats, Difficile 35 → 62 (densités 10 %, 13 %, 17 %, 22 %, 25 %, 25 %)
@@ -52,10 +52,12 @@ Issu de la comparaison avec KMines (novembre 2026).
 - [x] Explication des optimisations : `OPTIMISATION.txt`
 - [x] Vérifié en jeu : clic milieu, gauche+droit, sauvegarde d'un score après une victoire sans aide, mode `--cheat`
 - [x] « À Propos » : le texte du clic droit suit l'option des points d'interrogation
+- [x] Biais des retouches réduit de ~7 % à ~2 % en limitant le nombre de retouches par grille (voir `OPTIMISATION.txt`, §3.5)
+- [x] Version 1.2.0 (notes de version générées par GitHub à partir des commits)
 - [x] Fenêtre plafonnée à 90 % de l'écran : vérifié sur un écran 1024×600 (fenêtre 922×540, Chuck Norris jouable)
 - [x] Parties complètes jouées sans aide par un script qui lit l'écran et n'applique que les règles simples : 4 Débutant et 1 Ultra Difficile gagnées, 212 révélations sur chiffre réussies sur 212 (clic gauche, milieu, gauche+droit dans les deux ordres), score enregistré au dixième avec ses règles
 
 ## Reste à faire
 
-- [ ] Numéro de version et notes de version (toujours 1.1.0)
-- [ ] Biais des retouches : grilles ~7 % plus « aérées » qu'avec l'ancien tirage (voir `OPTIMISATION.txt`, §3.5)
+Rien : tout est fait et publié en version 1.2.0.
+
